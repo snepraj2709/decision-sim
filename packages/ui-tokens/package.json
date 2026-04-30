@@ -5,6 +5,7 @@
   "main": "tokens.css",
   "files": ["tokens.css"],
   "exports": {
-    ".": "./tokens.css"
+    ".": "./tokens.css",
+    "./tokens.css": "./tokens.css"
   }
 }
