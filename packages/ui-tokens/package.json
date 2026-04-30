@@ -1,0 +1,10 @@
+{
+  "name": "@dsim/ui-tokens",
+  "version": "0.1.0",
+  "private": true,
+  "main": "tokens.css",
+  "files": ["tokens.css"],
+  "exports": {
+    ".": "./tokens.css"
+  }
+}

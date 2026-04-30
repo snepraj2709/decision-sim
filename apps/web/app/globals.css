@@ -1,0 +1,23 @@
+/* Decision Simulation Engine — global stylesheet
+ *
+ * Order matters:
+ *   1. Tailwind base — gets baseline reset
+ *   2. Design tokens — defines the CSS vars Tailwind utilities reference
+ *   3. Tailwind components & utilities — can now use the token-backed colors
+ */
+
+@tailwind base;
+
+@import "@dsim/ui-tokens/tokens.css";
+
+@tailwind components;
+@tailwind utilities;
+
+/* Body defaults — fonts come from next/font (--font-inter), tokens come from above */
+html, body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  font-feature-settings: 'cv11', 'ss01', 'ss03';
+  -webkit-font-smoothing: antialiased;
+}

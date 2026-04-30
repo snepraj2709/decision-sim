@@ -1,0 +1,124 @@
+/* ============================================================================
+ * Decision Simulation Engine — Design Tokens
+ * ============================================================================
+ *
+ * Single source of truth for colors, typography, confidence states.
+ * Imported from apps/web/app/globals.css.
+ *
+ * Naming convention:
+ *   --bg, --bg-sunken, --bg-elevated   surface hierarchy
+ *   --ink, --ink-2/3/4                 text hierarchy (primary → quaternary)
+ *   --line, --line-strong, --line-soft borders
+ *   --conf-{high|med|low}              confidence color triplets (fg/soft/line)
+ *   --accent                           single accent — used SPARINGLY
+ *
+ * Confidence philosophy:
+ *   - Desaturated, never traffic-light bright
+ *   - Forest (high) / amber (medium) / clay (low) — clay, NOT red
+ *   - Each state has THREE colors: fg (text/glyph), soft (background fill),
+ *     line (border). Always use them as a set.
+ * ========================================================================== */
+
+:root {
+  /* ── Surface ──────────────────────────────────────────────────────────── */
+  --bg:           oklch(0.985 0.002 250);
+  --bg-sunken:    oklch(0.965 0.003 250);
+  --bg-elevated:  oklch(1.000 0.000 0);
+  --line:         oklch(0.910 0.004 250);
+  --line-strong:  oklch(0.860 0.005 250);
+  --line-soft:    oklch(0.945 0.003 250);
+
+  /* ── Ink (text hierarchy) ─────────────────────────────────────────────── */
+  --ink:          oklch(0.225 0.010 260);
+  --ink-2:        oklch(0.380 0.010 260);
+  --ink-3:        oklch(0.540 0.008 260);
+  --ink-4:        oklch(0.680 0.006 260);
+
+  /* ── Single accent — deep ink-blue ────────────────────────────────────── */
+  --accent:       oklch(0.380 0.080 255);
+  --accent-soft:  oklch(0.945 0.020 255);
+
+  /* ── Confidence: HIGH (desaturated forest) ────────────────────────────── */
+  --conf-high:        oklch(0.480 0.060 155);
+  --conf-high-soft:   oklch(0.955 0.020 155);
+  --conf-high-line:   oklch(0.870 0.030 155);
+
+  /* ── Confidence: MEDIUM (muted amber) ─────────────────────────────────── */
+  --conf-med:         oklch(0.620 0.080 80);
+  --conf-med-soft:    oklch(0.965 0.025 85);
+  --conf-med-line:    oklch(0.880 0.040 85);
+
+  /* ── Confidence: LOW (muted clay — NOT red) ───────────────────────────── */
+  --conf-low:         oklch(0.560 0.070 35);
+  --conf-low-soft:    oklch(0.960 0.020 35);
+  --conf-low-line:    oklch(0.880 0.030 35);
+}
+
+/* ============================================================================
+ * Patterns — the visible-degradation language for low confidence
+ * ========================================================================== */
+
+/* Diagonal stripe — subtle, never garish. Used on Low cells/cards/banners */
+.lc-stripe {
+  background-image: repeating-linear-gradient(
+    135deg,
+    transparent 0 6px,
+    oklch(0.560 0.070 35 / 0.06) 6px 7px
+  );
+}
+
+/* Faint dot grain — used on degraded segment rows */
+.lc-grain {
+  background-image:
+    radial-gradient(oklch(0.560 0.070 35 / 0.05) 1px, transparent 1px);
+  background-size: 4px 4px;
+}
+
+/* Dashed inner outline for medium-confidence cells */
+.mc-inner {
+  box-shadow: inset 0 0 0 1px var(--conf-med-line);
+  border-style: dashed !important;
+}
+
+/* ============================================================================
+ * Typography
+ * Font families are loaded by the Next.js layout via next/font/google.
+ * The classes below pin the family per-element.
+ * ========================================================================== */
+
+.font-sans-display {
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  font-feature-settings: 'cv11', 'ss01', 'ss03';
+}
+
+.font-mono {
+  font-family: var(--font-jetbrains-mono), ui-monospace, monospace;
+}
+
+.font-serif-display {
+  font-family: var(--font-source-serif), ui-serif, Georgia, serif;
+}
+
+/* ============================================================================
+ * Misc
+ * ========================================================================== */
+
+::selection { background: var(--accent-soft); color: var(--ink); }
+hr { border-color: var(--line); }
+
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
+  border: 2px solid var(--bg);
+}
+*::-webkit-scrollbar-track { background: transparent; }
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+.anim-fade-up { animation: fadeUp 180ms ease-out both; }
+@media (prefers-reduced-motion: reduce) {
+  .anim-fade-up { animation: none !important; opacity: 1 !important; transform: none !important; }
+}

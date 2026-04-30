@@ -1,0 +1,34 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: dsim-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dsim}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dsim_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-dsim}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - dsim_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dsim} -d ${POSTGRES_DB:-dsim}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: dsim-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - dsim_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  dsim_pg_data:
+  dsim_redis_data:
