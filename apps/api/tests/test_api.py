@@ -22,16 +22,18 @@ async def test_health_returns_ok(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_snapshot_endpoint_returns_501_with_message(client: AsyncClient) -> None:
+async def test_snapshot_endpoint_returns_202_with_job_id(client: AsyncClient) -> None:
+    """POST /snapshots should return 202 with a job_id for async processing."""
     res = await client.post(
         "/api/v1/snapshots",
         json={"url": "https://example.com"},
     )
-    assert res.status_code == 501
+    assert res.status_code == 202
     body = res.json()
-    # The message should point future-you (or your collaborator) at the right file.
-    assert "Step 2" in body["detail"]
-    assert "snapshot.py" in body["detail"]
+    assert "job_id" in body
+    assert "status_url" in body
+    assert body["job_id"]  # non-empty
+    assert "/api/v1/snapshots/jobs/" in body["status_url"]
 
 
 @pytest.mark.asyncio

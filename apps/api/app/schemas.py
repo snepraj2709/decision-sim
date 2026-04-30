@@ -61,12 +61,28 @@ class ProductSnapshotRead(BaseModel):
 
 
 class SnapshotCreateRequest(BaseModel):
-    """Kick off a snapshot run for a URL.
-
-    Step 2 wires this to the snapshot pipeline. Step 1 returns 501.
-    """
+    """Kick off a snapshot run for a URL."""
 
     url: str = Field(min_length=4, max_length=1024)
+
+
+# Job status for async snapshot processing
+JobStatus = Literal["queued", "started", "finished", "failed"]
+
+
+class SnapshotJobResponse(BaseModel):
+    """Response when a snapshot job is enqueued."""
+
+    job_id: str
+    status_url: str
+
+
+class SnapshotJobStatus(BaseModel):
+    """Status of a snapshot job."""
+
+    status: JobStatus
+    snapshot_id: uuid.UUID | None = None
+    error: str | None = None
 
 
 # ── Evidence ────────────────────────────────────────────────────────────────
