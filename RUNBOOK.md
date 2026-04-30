@@ -199,3 +199,190 @@ Step 2's prompt to Claude (or to yourself) starts with:
 Notice what changed: nothing about scaffolding, nothing about types, nothing about UI. The scaffolding fights are over. Step 2 is purely about implementing one well-defined contract.
 
 That clarity — the ability to write a precise next prompt — is what Step 1 buys you.
+
+---
+
+# Step 2 — Snapshot Pipeline Verification
+
+This section documents the verification protocol for Step 2. Run through it after implementing the snapshot pipeline.
+
+## What Step 2 ships
+
+- **Snapshot Pipeline** — A four-stage pipeline that transforms a URL into a ProductSnapshot:
+  1. **Scrape** — Playwright + trafilatura for fetching and extracting web content
+  2. **Search** — Tavily/Exa for gathering external evidence
+  3. **Extract** — DSPy for LLM-powered structured extraction
+  4. **Score** — Confidence triangulation + database persistence
+
+- **API Endpoints** — The 501 stub is replaced with working async endpoints:
+  - `POST /snapshots` — Enqueues job, returns 202 with job_id
+  - `GET /snapshots/{id}` — Returns completed snapshot
+  - `GET /snapshots/jobs/{job_id}` — Returns job status
+
+- **Tests** — Unit tests for pipeline components, integration tests for real URLs
+
+## Prerequisites
+
+Step 1 must be complete. Additionally:
+
+```bash
+# Sync dependencies with scrape and llm groups
+cd apps/api
+uv sync --group dev --group scrape --group llm
+
+# Install Playwright browsers
+uv run playwright install chromium
+
+# Set API keys in .env
+# At least one of:
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+
+# Optional (pipeline works without, but produces low confidence):
+TAVILY_API_KEY=tvly-...
+```
+
+## ✅ Verification checklist
+
+### 1. Unit tests pass
+
+```bash
+cd apps/api && uv run pytest -v -m "not integration"
+```
+
+Expected: ~70+ tests pass, no failures. Pay special attention to:
+
+- `test_geometric_mean_property` — proves confidence triangulation works
+- `test_high_sources_high_agreement_high_stability` — rich data → high confidence
+- `test_no_sources_produces_low` — no evidence → low confidence
+
+### 2. Mypy and Ruff are clean
+
+```bash
+cd apps/api && uv run mypy app && uv run ruff check .
+```
+
+Expected: No errors.
+
+### 3. POST /snapshots returns 202
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/snapshots \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://linear.app"}' | jq .
+```
+
+Expected:
+```json
+{
+  "job_id": "some-uuid",
+  "status_url": "http://localhost:8000/api/v1/snapshots/jobs/some-uuid"
+}
+```
+
+### 4. Job status endpoint works
+
+```bash
+# Use the job_id from step 3
+curl -s http://localhost:8000/api/v1/snapshots/jobs/{job_id} | jq .
+```
+
+Expected: `{"status": "queued"}` or `{"status": "started"}` or `{"status": "finished", "snapshot_id": "..."}`
+
+### 5. Worker processes the job
+
+With the RQ worker running (`uv run rq worker --url redis://localhost:6379`), wait for the job to complete. Check:
+
+```bash
+curl -s http://localhost:8000/api/v1/snapshots/jobs/{job_id} | jq .
+```
+
+Expected: `{"status": "finished", "snapshot_id": "..."}`
+
+### 6. Snapshot contains sensible data
+
+```bash
+curl -s http://localhost:8000/api/v1/snapshots/{snapshot_id} | jq .
+```
+
+Expected:
+- `category` contains something like "Project Management" or "Issue Tracking"
+- `value_prop` describes what Linear does
+- `features` lists actual Linear features
+- Confidence values are present ("high", "medium", or "low")
+
+### 7. Linear.app produces reasonable confidence
+
+The Linear.app snapshot should have:
+- At least 2-3 fields with "high" or "medium" confidence
+- `category_sources`, `value_prop_sources` should be > 0 if search keys are configured
+
+### 8. Thin product produces low confidence
+
+Test with a minimal site:
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/snapshots \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com"}' | jq .
+```
+
+After job completes, verify:
+- Most fields have "low" confidence
+- Source counts are 0 or very low
+- This is the correct behavior — low data → low confidence
+
+### 9. OpenAPI schema updated
+
+Visit http://localhost:8000/docs and verify:
+- `POST /snapshots` shows `SnapshotJobResponse` as response
+- `GET /snapshots/{snapshot_id}` shows `ProductSnapshotRead`
+- `GET /snapshots/jobs/{job_id}` shows `SnapshotJobStatus`
+- All schemas have proper types and descriptions
+
+### 10. Three real URLs complete successfully
+
+Test all three URLs end-to-end:
+
+1. **Linear.app** — Content-rich SaaS, should have good extraction
+2. **Vanta.com** — Security/compliance product, should work well
+3. **example.com** — Thin content, should produce mostly low confidence
+
+All three should:
+- Complete within 60 seconds
+- Produce a valid ProductSnapshot row
+- Have confidence labels derived from actual signals (not hardcoded)
+
+---
+
+## What "done" looks like
+
+All ten checkpoints green. The key property to verify:
+
+**Confidence scales with actual evidence.** A well-documented product (Linear) should produce higher confidence than a minimal site (example.com). If both produce the same confidence, the triangulation isn't working.
+
+When all ten pass: **commit, tag `step-2-complete`, and move to Step 3**.
+
+---
+
+## Troubleshooting
+
+### Job stays "queued" forever
+- Is the RQ worker running? Check `uv run rq worker --url redis://localhost:6379`
+- Is Redis running? Check `docker compose ps`
+
+### ScrapeError on homepage
+- Is the URL valid and reachable?
+- Does the site block headless browsers? Try adding realistic headers.
+
+### No search results
+- Are `TAVILY_API_KEY` or `EXA_API_KEY` set in `.env`?
+- Pipeline works without them but produces low confidence.
+
+### LLM errors
+- Is `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` set?
+- Check rate limits on your account.
+
+### All fields have low confidence
+- This is expected for thin products!
+- For rich products, check that search is returning results and LLM extraction is working.

@@ -5,7 +5,7 @@ Tests in Step 1 are deliberately limited:
   - health endpoint (proves the app boots + CORS + schema)
   - 501 contract on snapshot endpoint (proves the contract is wired)
 
-Steps 2–4 add real pipeline tests against a test database.
+Steps 2-4 add real pipeline tests against a test database.
 """
 
 from collections.abc import AsyncIterator
