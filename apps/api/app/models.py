@@ -9,7 +9,7 @@ Tables:
   - product_snapshots — versioned engine output: "what we think this product is"
   - segments       — generated customer segments per snapshot
   - evidence       — anchors (quotes / sources) supporting a segment or fact
-  - simulations    — a comparison run (Options × Segments → Reactions)
+  - simulations    — a comparison run (Options x Segments → Reactions)
   - simulation_cells — per-(segment, option) reaction with confidence
 
 Embeddings live alongside the row that owns them (segment.embedding,
@@ -24,7 +24,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pgvector.sqlalchemy import Vector
+from pgvector.sqlalchemy import Vector  # type: ignore[import-untyped]
 from sqlalchemy import (
     JSON,
     DateTime,
@@ -112,8 +112,8 @@ class ProductSnapshot(Base):
     competitors_sources: Mapped[int] = mapped_column(Integer, default=0)
 
     # Raw scrape + search artifacts kept for debugging / re-running
-    raw_scrape: Mapped[dict | None] = mapped_column(JSON)
-    raw_search_results: Mapped[dict | None] = mapped_column(JSON)
+    raw_scrape: Mapped[dict[str, object] | None] = mapped_column(JSON)
+    raw_search_results: Mapped[dict[str, object] | None] = mapped_column(JSON)
 
     product: Mapped[Product] = relationship(back_populates="snapshots")
     segments: Mapped[list[Segment]] = relationship(
@@ -125,7 +125,7 @@ class ProductSnapshot(Base):
 class Segment(Base):
     """A generated customer segment for a given snapshot.
 
-    Each snapshot typically yields 4–5 segments. Segments belong to a snapshot,
+    Each snapshot typically yields 4-5 segments. Segments belong to a snapshot,
     not directly to a product, because changing the product card invalidates
     the segments — they need to be regenerated.
     """
@@ -145,7 +145,7 @@ class Segment(Base):
     job_to_be_done: Mapped[str | None] = mapped_column(Text)
     share_pct: Mapped[int | None] = mapped_column(Integer)  # 0..100, est. % of base
     confidence: Mapped[str] = mapped_column(String(8), nullable=False)
-    drivers: Mapped[list[dict] | None] = mapped_column(JSON)  # [{label, weight}, ...]
+    drivers: Mapped[list[dict[str, object]] | None] = mapped_column(JSON)  # [{label, weight}, ...]
     leaves: Mapped[str | None] = mapped_column(Text)  # what triggers churn
 
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM))
@@ -200,7 +200,7 @@ class Simulation(Base):
     )
     decision_type: Mapped[str] = mapped_column(String(64), nullable=False)
     # decision_type ∈ {'pricing', 'copy', 'feature', 'bundle', 'onboarding'}
-    options: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
+    options: Mapped[list[dict[str, object]]] = mapped_column(JSON, nullable=False)
     # [{letter: 'A', title: '...', sub: '...'}, ...]
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
     # status ∈ {'pending', 'running', 'completed', 'failed'}

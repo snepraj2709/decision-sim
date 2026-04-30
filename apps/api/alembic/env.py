@@ -7,15 +7,15 @@ schema they describe is the same.
 
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from app.config import get_settings
-from app.db import Base
+from alembic import context
 
 # Import models so their metadata is registered with Base.metadata before
 # autogenerate runs. Without this, Alembic produces empty migrations.
 from app import models  # noqa: F401
+from app.config import get_settings
+from app.db import Base
 
 config = context.config
 

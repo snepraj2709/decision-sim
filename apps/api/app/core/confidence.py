@@ -26,6 +26,7 @@ Tests live in `tests/test_confidence.py` and run on every CI run.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -111,7 +112,7 @@ def triangulate(signals: TriangulationInput) -> Confidence:
     b = max(0.0, min(1.0, signals.evidence_density))
     c = max(0.0, min(1.0, signals.construct_stability))
 
-    score = (a * b * c) ** (1 / 3)
+    score = math.pow(a * b * c, 1.0 / 3.0)
 
     if score >= HIGH_THRESHOLD:
         return "high"
@@ -125,4 +126,4 @@ def combined_score(signals: TriangulationInput) -> float:
     a = max(0.0, min(1.0, signals.llm_baserate_agreement))
     b = max(0.0, min(1.0, signals.evidence_density))
     c = max(0.0, min(1.0, signals.construct_stability))
-    return (a * b * c) ** (1 / 3)
+    return math.pow(a * b * c, 1.0 / 3.0)

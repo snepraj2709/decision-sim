@@ -5,7 +5,7 @@ confidence score. This is the most failure-prone layer of the engine and
 deserves the most careful implementation.
 
 Pipeline stages (Step 4 will implement):
-    For each (segment × option) pair:
+    For each (segment x option) pair:
 
       A. Generative reasoning trace
          A DSPy program prompts the LLM in-character: "You are [segment].
