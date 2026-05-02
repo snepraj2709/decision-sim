@@ -395,3 +395,157 @@ When all ten pass: **commit, tag `step-2-complete`, and move to Step 3**.
 ### All fields have low confidence
 - This is expected for thin products!
 - For rich products, check that search is returning results and LLM extraction is working.
+
+---
+
+# Step 3 — ICP Pipeline Verification
+
+This section documents the verification protocol for Step 3. Run through it after implementing the ICP generation pipeline.
+
+## What Step 3 ships
+
+- **ICP Pipeline** — A four-stage pipeline that transforms a `ProductSnapshot` into evidence-anchored customer segments:
+  1. **Cluster** — Extract public search snippets, embed them, and form candidate quote clusters
+  2. **Synthesize** — Use DSPy to convert clusters into named segment drafts with cited drivers
+  3. **Anchor** — Attach the 2-3 closest source quotes as `Evidence` rows
+  4. **Score** — Use `triangulate()` with source diversity, quote coherence, and segment distinctness
+
+- **API Endpoints**:
+  - `POST /snapshots/{snapshot_id}/icps` — Enqueues ICP generation, returns 202 with `job_id`
+  - `GET /snapshots/{snapshot_id}/segments` — Returns generated segments with nested evidence
+  - `GET /icps/jobs/{job_id}` — Returns RQ job status
+
+- **Tests**:
+  - Pure ICP pipeline unit tests, including thin and adversarial fixtures
+  - API tests for the new segment endpoints
+  - Integration tests that read Step 2 snapshot IDs from `tests/fixtures/snapshot_uuids.json`
+
+## Prerequisites
+
+```bash
+cd apps/api
+uv sync --group dev --group scrape --group llm
+uv run alembic upgrade head
+```
+
+At least one LLM API key must be configured:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-...
+# or
+OPENAI_API_KEY=sk-...
+```
+
+`OPENAI_API_KEY` enables real 1536-dim embeddings. If OpenAI embeddings fail, or if only `ANTHROPIC_API_KEY` is configured, Step 3 falls back to deterministic hash embeddings so the pipeline remains runnable. Treat hash clustering as a development fallback; it is lower quality than semantic embeddings.
+
+## ✅ Verification checklist
+
+### 1. Unit tests pass
+
+```bash
+cd apps/api
+uv run pytest -v -m "not integration"
+```
+
+Expected: all non-integration tests pass. Pay special attention to:
+
+- `test_openai_embedding_error_falls_back_to_hash` — OpenAI key path remains runnable if embedding calls fail
+- `test_anthropic_key_uses_hash_embeddings` — Anthropic-only path remains runnable
+- `test_adversarial_all_similar_produces_low_stability` — near-duplicate segments cannot become overconfident
+- `test_high_evidence_low_coherence_produces_low` — geometric mean still kills confidence when one signal is weak
+
+### 2. Mypy and Ruff are clean
+
+```bash
+cd apps/api
+uv run mypy app
+uv run ruff check .
+```
+
+Expected: no errors.
+
+### 3. POST /snapshots/{snapshot_id}/icps returns 202
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/snapshots/{snapshot_id}/icps | jq .
+```
+
+Expected:
+
+```json
+{
+  "job_id": "some-uuid",
+  "status_url": "http://localhost:8000/api/v1/icps/jobs/some-uuid"
+}
+```
+
+### 4. Job status endpoint works
+
+```bash
+curl -s http://localhost:8000/api/v1/icps/jobs/{job_id} | jq .
+```
+
+Expected: `{"status": "queued"}`, `{"status": "started"}`, or `{"status": "finished", "segment_ids": ["..."]}`.
+
+### 5. Segments endpoint returns anchored evidence
+
+```bash
+curl -s http://localhost:8000/api/v1/snapshots/{snapshot_id}/segments | jq .
+```
+
+Expected:
+
+- 1-5 segment objects
+- each segment has `name`, `job_to_be_done`, `share_pct`, `confidence`, and `evidence`
+- evidence quotes are real snippets from source URLs, not generated text
+
+### 6. Linear snapshot produces usable segments
+
+Use the Linear snapshot ID from `apps/api/tests/fixtures/snapshot_uuids.json`.
+
+Expected:
+
+- at least 3 segments
+- at least one Medium-or-High confidence segment
+- at least one Medium-or-High segment has 2+ evidence anchors from distinct domains
+
+### 7. example.com remains Low confidence
+
+Use the example.com snapshot ID from `apps/api/tests/fixtures/snapshot_uuids.json`.
+
+Expected:
+
+- 1-3 segments when thin public signal exists
+- all segments are Low confidence
+- the UI should render these as Hypothesis-style segments
+
+### 8. Vanta completes and quality is documented
+
+Use the Vanta snapshot ID from `apps/api/tests/fixtures/snapshot_uuids.json`.
+
+Expected:
+
+- pipeline completes without crashing
+- segment count and confidence distribution are documented below
+- if the segments are low quality, preserve that as a finding instead of tuning confidence upward
+
+### 9. Integration tests pass when live prerequisites exist
+
+```bash
+cd apps/api
+uv run pytest -v -m integration
+```
+
+If the database was recreated, regenerate Step 2 snapshots and update `tests/fixtures/snapshot_uuids.json`.
+
+## Verification results
+
+Record local Step 3 verification here:
+
+- Non-integration tests: `uv run pytest -m "not integration" -q` passed — 131 passed, 11 deselected, 11 DSPy deprecation warnings.
+- `uv run mypy app`: passed — no issues in 28 source files.
+- `uv run ruff check .`: passed.
+- Integration check: `uv run pytest -m integration -q` did not complete cleanly in this local environment. ICP integration could not connect to Postgres at `localhost:5432`; snapshot live integration reached OpenAI but failed with insufficient quota. Re-run after local services and API billing are available.
+- Linear: not live-verified in this run because integration was blocked by local Postgres/API quota.
+- example.com: not live-verified in this run because integration was blocked by local Postgres/API quota.
+- Vanta: not live-verified in this run because integration was blocked by local Postgres/API quota.

@@ -85,6 +85,22 @@ class SnapshotJobStatus(BaseModel):
     error: str | None = None
 
 
+# ── ICP Job Schemas ─────────────────────────────────────────────────────────
+class ICPJobResponse(BaseModel):
+    """Response when an ICP generation job is enqueued."""
+
+    job_id: str
+    status_url: str
+
+
+class ICPJobStatus(BaseModel):
+    """Status of an ICP generation job."""
+
+    status: JobStatus
+    segment_ids: list[uuid.UUID] | None = None
+    error: str | None = None
+
+
 # ── Evidence ────────────────────────────────────────────────────────────────
 EvidenceKind = Literal["reddit", "g2", "twitter", "capterra", "review", "press", "other"]
 

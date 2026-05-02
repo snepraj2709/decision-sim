@@ -11,7 +11,7 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1 import health, snapshots
+from app.api.v1 import health, segments, snapshots
 from app.config import get_settings
 
 settings = get_settings()
@@ -42,6 +42,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router, prefix="/api/v1", tags=["health"])
     app.include_router(snapshots.router, prefix="/api/v1", tags=["snapshots"])
+    app.include_router(segments.router, prefix="/api/v1", tags=["segments"])
 
     return app
 

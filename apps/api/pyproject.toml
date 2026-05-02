@@ -44,6 +44,9 @@ llm = [
     "anthropic>=0.39.0",
     "openai>=1.54.0",
     "dspy>=2.5.0",
+    "hdbscan>=0.8.33",
+    "scikit-learn>=1.5.0",
+    "numpy>=1.26.0",
 ]
 
 [tool.ruff]
