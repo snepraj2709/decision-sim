@@ -53,3 +53,4 @@ coverage/
 # Local data
 .local/
 tmp/
+.gitnexus
