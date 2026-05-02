@@ -16,8 +16,6 @@ Tests verify:
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 # Skip all tests in this module if not running integration tests
@@ -27,13 +25,19 @@ pytestmark = pytest.mark.integration
 @pytest.fixture
 def has_llm_key() -> bool:
     """Check if an LLM API key is available."""
-    return bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY"))
+    from app.config import get_settings
+
+    settings = get_settings()
+    return bool(settings.anthropic_api_key or settings.openai_api_key)
 
 
 @pytest.fixture
 def has_search_key() -> bool:
     """Check if a search API key is available."""
-    return bool(os.getenv("TAVILY_API_KEY") or os.getenv("EXA_API_KEY"))
+    from app.config import get_settings
+
+    settings = get_settings()
+    return bool(settings.tavily_api_key or settings.exa_api_key)
 
 
 class TestRealProductSnapshots:
@@ -136,7 +140,10 @@ class TestRealProductSnapshots:
         for field_name in ["category", "value_prop", "pricing", "features", "audience"]:
             field = getattr(extraction, field_name)
             confidence, _ = compute_field_confidence(
-                field, search_results, settings.min_sources_for_high_confidence
+                field,
+                search_results,
+                settings.min_sources_for_high_confidence,
+                scrape_result,
             )
             if confidence == "low":
                 low_count += 1

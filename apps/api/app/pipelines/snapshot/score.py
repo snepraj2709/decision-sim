@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from urllib.parse import urlparse
 
 import structlog
 from sqlalchemy import select
@@ -43,12 +44,72 @@ from app.pipelines.snapshot.search import SearchResult
 
 log = structlog.get_logger()
 
+STOP_WORDS = {
+    "and",
+    "are",
+    "but",
+    "for",
+    "from",
+    "into",
+    "not",
+    "the",
+    "that",
+    "this",
+    "with",
+    "you",
+    "your",
+}
+
+UNKNOWN_VALUES = {
+    "",
+    "n/a",
+    "none",
+    "not applicable",
+    "not specified",
+    "unknown",
+}
+
+FIRST_PARTY_MIN_TOTAL_CHARS = 1000
+FIRST_PARTY_MIN_PAGE_CHARS = 300
+FIRST_PARTY_SUPPORT_THRESHOLD = 0.35
+FIRST_PARTY_ALIGNMENT_THRESHOLD = 0.30
+TRUSTED_EXTERNAL_SOURCE_KINDS = {"reddit", "g2", "capterra", "twitter", "press", "blog"}
+COMMON_DOMAIN_TOKENS = {
+    "app",
+    "com",
+    "co",
+    "io",
+    "net",
+    "org",
+    "www",
+}
+
 
 def _tokenize(text: str) -> set[str]:
     """Simple tokenization for Jaccard similarity."""
+    return set(_token_sequence(text))
+
+
+def _token_sequence(text: str) -> list[str]:
+    """Return normalized tokens while preserving order."""
     # Lowercase, split on non-alphanumeric, remove short tokens
     tokens = re.findall(r"\b[a-z0-9]{3,}\b", text.lower())
-    return set(tokens)
+    return [token for token in tokens if token not in STOP_WORDS]
+
+
+def _has_contiguous_sequence(needle: list[str], haystack: list[str]) -> bool:
+    """Return true when all needle tokens appear consecutively in haystack."""
+    if not needle or len(needle) > len(haystack):
+        return False
+
+    needle_len = len(needle)
+    return any(haystack[idx : idx + needle_len] == needle for idx in range(len(haystack) - needle_len + 1))
+
+
+def _is_unknownish(value: str) -> bool:
+    """Return true for placeholder values that should not earn confidence."""
+    normalized = value.strip().lower().rstrip(".")
+    return normalized in UNKNOWN_VALUES
 
 
 def compute_inter_source_agreement(
@@ -72,11 +133,14 @@ def compute_inter_source_agreement(
     if not field_value or not supporting_snippets:
         return 0.0
 
-    field_tokens = _tokenize(field_value)
+    field_sequence = _token_sequence(field_value)
+    field_tokens = set(field_sequence)
     if not field_tokens:
         return 0.0
 
-    # Compute Jaccard with each snippet, take max
+    # Compute agreement with each snippet, taking the best source. Plain
+    # Jaccard unfairly penalizes concise facts against long evidence pages, so
+    # include directional coverage: how much of the field appears in the source.
     max_jaccard = 0.0
     for snippet in supporting_snippets:
         snippet_tokens = _tokenize(snippet)
@@ -87,7 +151,14 @@ def compute_inter_source_agreement(
         union = len(field_tokens | snippet_tokens)
         if union > 0:
             jaccard = intersection / union
-            max_jaccard = max(max_jaccard, jaccard)
+            coverage = intersection / len(field_tokens)
+            snippet_sequence = _token_sequence(snippet)
+            # Very short labels are prone to false support from scattered terms
+            # in long pages. Require phrase-level support before using the
+            # directional coverage shortcut.
+            if len(field_tokens) <= 2 and not _has_contiguous_sequence(field_sequence, snippet_sequence):
+                coverage = jaccard
+            max_jaccard = max(max_jaccard, jaccard, coverage)
 
     # Also compute average Jaccard for multiple sources
     if len(supporting_snippets) > 1:
@@ -153,6 +224,7 @@ def compute_field_confidence(
     field: ExtractedField,
     search_results: list[SearchResult],
     settings_min_sources: int,
+    scrape_result: ScrapeResult | None = None,
 ) -> tuple[Confidence, int]:
     """Compute confidence for a single field.
 
@@ -164,13 +236,30 @@ def compute_field_confidence(
     Returns:
         Tuple of (confidence_label, source_count).
     """
-    # Gather supporting snippets
+    # Gather supporting snippets from valid LLM-cited external search results.
     supporting_snippets: list[str] = []
+    valid_external_source_ids: set[int] = set()
+    first_party_snippets = _first_party_supporting_snippets(field.value, scrape_result)
     for idx in field.sources:
-        if 0 <= idx < len(search_results) and search_results[idx].snippet:
+        if (
+            0 <= idx < len(search_results)
+            and search_results[idx].snippet
+            and _is_relevant_external_source(
+                result=search_results[idx],
+                scrape_result=scrape_result,
+                field_value=field.value,
+                first_party_supports_field=bool(first_party_snippets),
+            )
+        ):
+            valid_external_source_ids.add(idx)
             supporting_snippets.append(search_results[idx].snippet)
 
-    n_sources = len(set(field.sources))  # Unique sources
+    first_party_source_count = 0
+    if first_party_snippets and valid_external_source_ids:
+        supporting_snippets.extend(first_party_snippets)
+        first_party_source_count = 1
+
+    n_sources = len(valid_external_source_ids) + first_party_source_count
 
     # Signal 1: Evidence density
     evidence_density = evidence_density_from_count(
@@ -198,6 +287,8 @@ def compute_field_confidence(
     log.debug(
         "score.field.computed",
         value=field.value[:50] if field.value else "",
+        external_sources=len(valid_external_source_ids),
+        first_party_sources=first_party_source_count,
         n_sources=n_sources,
         evidence_density=round(evidence_density, 2),
         inter_source=round(inter_source, 2),
@@ -206,6 +297,121 @@ def compute_field_confidence(
     )
 
     return confidence, n_sources
+
+
+def _first_party_supporting_snippets(
+    field_value: str,
+    scrape_result: ScrapeResult | None,
+) -> list[str]:
+    """Return scraped page text that corroborates a field.
+
+    First-party website evidence is useful for rich product pages, but it
+    should not rescue guesses on thin pages or replace external evidence.
+    """
+    if not scrape_result or _is_unknownish(field_value):
+        return []
+
+    text_pages = [
+        page.clean_text
+        for page in scrape_result.pages
+        if len(page.clean_text.strip()) >= FIRST_PARTY_MIN_PAGE_CHARS
+    ]
+    if sum(len(text) for text in text_pages) < FIRST_PARTY_MIN_TOTAL_CHARS:
+        return []
+
+    supporting_pages = [
+        text
+        for text in text_pages
+        if compute_inter_source_agreement(field_value, [text]) >= FIRST_PARTY_SUPPORT_THRESHOLD
+    ]
+    return supporting_pages[:2]
+
+
+def _is_relevant_external_source(
+    *,
+    result: SearchResult,
+    scrape_result: ScrapeResult | None,
+    field_value: str,
+    first_party_supports_field: bool,
+) -> bool:
+    """Return whether a cited search result is about this product.
+
+    Search providers often return SEO/domain-name noise for sparse sites. A
+    result must first identify the product. After that, trusted review/social/
+    press sources can stand on their own; generic "other" sources need either
+    topical alignment with the product site or first-party support for the same
+    field value.
+    """
+    if scrape_result is None:
+        return True
+
+    if _is_same_site(result.url, scrape_result):
+        return True
+
+    if not _mentions_product_identity(result, scrape_result):
+        return False
+
+    if result.source_kind in TRUSTED_EXTERNAL_SOURCE_KINDS:
+        return True
+
+    if first_party_supports_field and compute_inter_source_agreement(
+        field_value,
+        [_search_result_text(result)],
+    ) >= FIRST_PARTY_SUPPORT_THRESHOLD:
+        return True
+
+    return _first_party_alignment(result, scrape_result) >= FIRST_PARTY_ALIGNMENT_THRESHOLD
+
+
+def _is_same_site(url: str, scrape_result: ScrapeResult) -> bool:
+    """Return true if a search result URL is on the product's own domain."""
+    return _normalized_host(url) == _normalized_host(scrape_result.url_canonical)
+
+
+def _mentions_product_identity(result: SearchResult, scrape_result: ScrapeResult) -> bool:
+    """Return true if title/snippet/url mention the product host or name token."""
+    text = _search_result_text(result).lower()
+    host = _normalized_host(scrape_result.url_canonical)
+    if host and host in text:
+        return True
+
+    return any(re.search(rf"\b{re.escape(term)}\b", text) for term in _identity_terms(host))
+
+
+def _first_party_alignment(result: SearchResult, scrape_result: ScrapeResult) -> float:
+    """Estimate whether a search result talks about the same thing as the site."""
+    official_tokens = _tokenize(_first_party_text(scrape_result))
+    result_tokens = _tokenize(f"{result.title} {result.snippet}")
+    if not official_tokens or not result_tokens:
+        return 0.0
+
+    overlap = len(official_tokens & result_tokens)
+    return overlap / max(1, min(len(result_tokens), 50))
+
+
+def _search_result_text(result: SearchResult) -> str:
+    """Return all searchable text for a search result."""
+    return f"{result.url} {result.title} {result.snippet}"
+
+
+def _first_party_text(scrape_result: ScrapeResult) -> str:
+    """Return concatenated first-party clean text."""
+    return "\n".join(page.clean_text for page in scrape_result.pages)
+
+
+def _normalized_host(url: str) -> str:
+    """Return a lowercase host without a leading www."""
+    return urlparse(url).netloc.lower().removeprefix("www.")
+
+
+def _identity_terms(host: str) -> set[str]:
+    """Return distinctive product-name-ish tokens from a host."""
+    raw_tokens = re.split(r"[^a-z0-9]+", host.lower())
+    return {
+        token
+        for token in raw_tokens
+        if len(token) >= 4 and token not in COMMON_DOMAIN_TOKENS
+    }
 
 
 async def score_and_persist(
@@ -236,6 +442,7 @@ async def score_and_persist(
             field,
             search_results,
             settings.min_sources_for_high_confidence,
+            scrape_result,
         )
         fields_data[field_name] = (field.value, confidence, n_sources)
 

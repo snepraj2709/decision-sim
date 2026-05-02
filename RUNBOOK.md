@@ -291,7 +291,16 @@ Expected: `{"status": "queued"}` or `{"status": "started"}` or `{"status": "fini
 
 ### 5. Worker processes the job
 
-With the RQ worker running (`uv run rq worker --url redis://localhost:6379`), wait for the job to complete. Check:
+With the RQ worker running, wait for the job to complete. On macOS, keep the
+`OBJC_DISABLE_INITIALIZE_FORK_SAFETY` prefix; RQ's default worker forks and
+Playwright's browser stack can otherwise abort the work-horse process.
+
+```bash
+cd apps/api
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES uv run rq worker --url redis://localhost:6379
+```
+
+Check:
 
 ```bash
 curl -s http://localhost:8000/api/v1/snapshots/jobs/{job_id} | jq .
@@ -368,7 +377,7 @@ When all ten pass: **commit, tag `step-2-complete`, and move to Step 3**.
 ## Troubleshooting
 
 ### Job stays "queued" forever
-- Is the RQ worker running? Check `uv run rq worker --url redis://localhost:6379`
+- Is the RQ worker running? Check `OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES uv run rq worker --url redis://localhost:6379`
 - Is Redis running? Check `docker compose ps`
 
 ### ScrapeError on homepage

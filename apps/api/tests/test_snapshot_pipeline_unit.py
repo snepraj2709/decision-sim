@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.core.confidence import TriangulationInput, triangulate
 from app.pipelines.snapshot.extract import (
@@ -28,6 +29,7 @@ from app.pipelines.snapshot.scrape import (
     ScrapedPage,
     ScrapeResult,
     _classify_link,
+    _navigate_to_usable_dom,
     normalize_url,
 )
 from app.pipelines.snapshot.search import SearchResult, classify_source_kind
@@ -67,6 +69,29 @@ class TestClassifyLink:
 
     def test_no_match_returns_none(self) -> None:
         assert _classify_link("/blog/post-123", "Latest News") is None
+
+
+class TestNavigation:
+    @pytest.mark.asyncio
+    async def test_networkidle_timeout_is_non_fatal(self) -> None:
+        class FakePage:
+            def __init__(self) -> None:
+                self.goto_wait_until: str | None = None
+                self.wait_for_load_state_called = False
+
+            async def goto(self, url: str, wait_until: str, timeout: int) -> None:
+                self.goto_wait_until = wait_until
+
+            async def wait_for_load_state(self, state: str, timeout: int) -> None:
+                self.wait_for_load_state_called = True
+                raise PlaywrightTimeoutError("networkidle timeout")
+
+        page = FakePage()
+
+        await _navigate_to_usable_dom(page, "https://example.com", 15000)
+
+        assert page.goto_wait_until == "domcontentloaded"
+        assert page.wait_for_load_state_called
 
 
 # ─── Source Kind Classification Tests ───────────────────────────────────────
@@ -134,6 +159,18 @@ class TestInterSourceAgreement:
             ],
         )
         assert multiple >= single
+
+    def test_short_field_requires_phrase_match(self) -> None:
+        """Scattered terms in a long source should not fully support a label."""
+        result = compute_inter_source_agreement(
+            "Domain Registration",
+            [
+                "Example domains are maintained for illustrative examples. "
+                "They are available for registration or transfer."
+            ],
+        )
+
+        assert result < 0.3
 
 
 # ─── Construct Stability Tests ──────────────────────────────────────────────
@@ -221,6 +258,196 @@ class TestFieldConfidence:
         assert n_sources == 5
         # Even with 5 sources, low agreement should drag confidence down
         assert confidence in ("low", "medium")
+
+    def test_rich_first_party_evidence_can_lift_confidence(self) -> None:
+        """A rich product site should count as corroborating evidence."""
+        field = ExtractedField(
+            value="Issue tracking; Project planning; Roadmaps",
+            sources=[0],
+            reasoning="Supported by the product page",
+        )
+        search_results = [
+            SearchResult(
+                query="test",
+                url="https://example.com/review",
+                title="Review",
+                snippet="Engineering teams rely on this software to plan product work.",
+                published_date=None,
+                source_kind="g2",
+            )
+        ]
+        rich_scrape = ScrapeResult(
+            url_canonical="https://example.com",
+            pages=[
+                ScrapedPage(
+                    url="https://example.com",
+                    kind="homepage",
+                    raw_html="<html></html>",
+                    clean_text=(
+                        "Issue tracking, project planning, roadmaps, sprint planning, "
+                        "and product development workflows for engineering teams. "
+                        * 20
+                    ),
+                    fetched_at=datetime.now(UTC),
+                )
+            ],
+        )
+
+        confidence, n_sources = compute_field_confidence(field, search_results, 3, rich_scrape)
+
+        assert n_sources == 2
+        assert confidence == "medium"
+
+    def test_irrelevant_external_source_does_not_count(self) -> None:
+        """A cited source must mention the product identity to count."""
+        field = ExtractedField(
+            value="Issue tracking; Project planning; Roadmaps",
+            sources=[0],
+            reasoning="Irrelevant evidence",
+        )
+        search_results = [
+            SearchResult(
+                query="test",
+                url="https://g2.com/products/unrelated-tool",
+                title="Review",
+                snippet="Engineering teams rely on this software to plan product work.",
+                published_date=None,
+                source_kind="g2",
+            )
+        ]
+        thin_scrape = ScrapeResult(
+            url_canonical="https://example.com",
+            pages=[
+                ScrapedPage(
+                    url="https://example.com",
+                    kind="homepage",
+                    raw_html="<html></html>",
+                    clean_text="Issue tracking coming soon.",
+                    fetched_at=datetime.now(UTC),
+                )
+            ],
+        )
+
+        confidence, n_sources = compute_field_confidence(field, search_results, 3, thin_scrape)
+
+        assert n_sources == 0
+        assert confidence == "low"
+
+    def test_thin_scrape_rejects_noisy_external_search(self) -> None:
+        """Search noise should not make a thin site look well-understood."""
+        field = ExtractedField(
+            value="Domain registration and management",
+            sources=[0, 1, 2],
+            reasoning="Search results mention domain services",
+        )
+        search_results = [
+            SearchResult(
+                query="test",
+                url=f"https://domains-directory.test/reviews/example-com-{i}",
+                title=f"example.com domain services result {i}",
+                snippet="Domain registration and management services for business websites",
+                published_date=None,
+                source_kind="other",
+            )
+            for i in range(3)
+        ]
+        thin_scrape = ScrapeResult(
+            url_canonical="https://example.com",
+            pages=[
+                ScrapedPage(
+                    url="https://example.com",
+                    kind="homepage",
+                    raw_html="<html></html>",
+                    clean_text="Example Domain. This domain is for use in illustrative examples.",
+                    fetched_at=datetime.now(UTC),
+                )
+            ],
+        )
+
+        confidence, n_sources = compute_field_confidence(field, search_results, 3, thin_scrape)
+
+        assert n_sources == 0
+        assert confidence == "low"
+
+    def test_thin_product_with_trusted_external_coverage_can_gain_confidence(self) -> None:
+        """A real product with sparse first-party text can still use trusted coverage."""
+        field = ExtractedField(
+            value="Compliance automation for security teams",
+            sources=[0, 1, 2],
+            reasoning="Trusted external sources all describe the same product",
+        )
+        search_results = [
+            SearchResult(
+                query="test",
+                url="https://www.g2.com/products/acmeai/reviews",
+                title="AcmeAI Reviews",
+                snippet="AcmeAI is compliance automation for security teams.",
+                published_date=None,
+                source_kind="g2",
+            ),
+            SearchResult(
+                query="test",
+                url="https://techcrunch.com/acmeai-launch",
+                title="AcmeAI launches compliance automation",
+                snippet="AcmeAI helps security teams automate compliance workflows.",
+                published_date=None,
+                source_kind="press",
+            ),
+            SearchResult(
+                query="test",
+                url="https://reddit.com/r/cybersecurity/comments/acmeai",
+                title="AcmeAI discussion",
+                snippet="Security teams use AcmeAI for compliance automation.",
+                published_date=None,
+                source_kind="reddit",
+            ),
+        ]
+        thin_scrape = ScrapeResult(
+            url_canonical="https://acmeai.com",
+            pages=[
+                ScrapedPage(
+                    url="https://acmeai.com",
+                    kind="homepage",
+                    raw_html="<html></html>",
+                    clean_text="AcmeAI is coming soon.",
+                    fetched_at=datetime.now(UTC),
+                )
+            ],
+        )
+
+        confidence, n_sources = compute_field_confidence(field, search_results, 3, thin_scrape)
+
+        assert n_sources == 3
+        assert confidence == "high"
+
+    def test_first_party_evidence_requires_external_anchor(self) -> None:
+        """Search-disabled runs should remain low-confidence."""
+        field = ExtractedField(
+            value="Issue tracking; Project planning; Roadmaps",
+            sources=[],
+            reasoning="Only first-party content",
+        )
+        rich_scrape = ScrapeResult(
+            url_canonical="https://example.com",
+            pages=[
+                ScrapedPage(
+                    url="https://example.com",
+                    kind="homepage",
+                    raw_html="<html></html>",
+                    clean_text=(
+                        "Issue tracking, project planning, roadmaps, sprint planning, "
+                        "and product development workflows for engineering teams. "
+                        * 20
+                    ),
+                    fetched_at=datetime.now(UTC),
+                )
+            ],
+        )
+
+        confidence, n_sources = compute_field_confidence(field, [], 3, rich_scrape)
+
+        assert n_sources == 0
+        assert confidence == "low"
 
 
 # ─── Content Preparation Tests ──────────────────────────────────────────────

@@ -21,12 +21,13 @@ import asyncio
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urljoin, urlparse
 
 import structlog
 import trafilatura
-from playwright.sync_api import sync_playwright
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import async_playwright
 
 log = structlog.get_logger()
 
@@ -70,6 +71,12 @@ SCRAPE_TIMEOUT = 60
 
 # Per-page timeout in seconds
 PAGE_TIMEOUT = 15000  # milliseconds for Playwright
+
+# Some modern marketing sites keep analytics or personalization requests open
+# indefinitely. Waiting for `networkidle` as the primary load condition turns
+# those long-lived requests into false scrape failures.
+NETWORK_IDLE_TIMEOUT = 5000
+POST_LOAD_SETTLE_MS = 1000
 
 
 class ScrapeError(Exception):
@@ -213,12 +220,28 @@ def _extract_links(html: str, base_url: str) -> dict[PageKind, str]:
     return result
 
 
-def _fetch_page_sync(url: str, timeout_ms: int = PAGE_TIMEOUT) -> tuple[str, str]:
-    """Fetch a page using Playwright (sync API). Returns (html, clean_text)."""
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+async def _navigate_to_usable_dom(page: Any, url: str, timeout_ms: int) -> None:
+    """Navigate to a page and proceed once the DOM is usable."""
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+    except PlaywrightTimeoutError:
+        log.warning("scrape.domcontentloaded.timeout", url=url, timeout_ms=timeout_ms)
+
+    try:
+        await page.wait_for_load_state(
+            "networkidle",
+            timeout=min(NETWORK_IDLE_TIMEOUT, timeout_ms),
+        )
+    except PlaywrightTimeoutError:
+        log.debug("scrape.networkidle.timeout", url=url)
+
+
+async def _fetch_page(url: str, timeout_ms: int = PAGE_TIMEOUT) -> tuple[str, str]:
+    """Fetch a page using Playwright. Returns (html, clean_text)."""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
         try:
-            context = browser.new_context(
+            context = await browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -226,16 +249,15 @@ def _fetch_page_sync(url: str, timeout_ms: int = PAGE_TIMEOUT) -> tuple[str, str
                 ),
                 viewport={"width": 1280, "height": 720},
             )
-            page = context.new_page()
+            page = await context.new_page()
 
-            # Navigate with timeout
-            page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+            await _navigate_to_usable_dom(page, url, timeout_ms)
 
             # Wait a bit for any late JS
-            page.wait_for_timeout(1000)
+            await page.wait_for_timeout(POST_LOAD_SETTLE_MS)
 
             # Get HTML
-            html = page.content()
+            html = await page.content()
 
             # Extract text using trafilatura
             clean_text = trafilatura.extract(
@@ -248,12 +270,7 @@ def _fetch_page_sync(url: str, timeout_ms: int = PAGE_TIMEOUT) -> tuple[str, str
 
             return html, clean_text
         finally:
-            browser.close()
-
-
-async def _fetch_page(url: str) -> tuple[str, str]:
-    """Async wrapper around sync Playwright fetch."""
-    return await asyncio.to_thread(_fetch_page_sync, url)
+            await browser.close()
 
 
 async def run_scrape(url: str) -> ScrapeResult:

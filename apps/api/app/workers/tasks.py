@@ -31,9 +31,15 @@ def task_run_snapshot(url: str) -> str:
     log.info("task.snapshot.start", url=url)
 
     async def _run() -> uuid.UUID:
+        from app.db import engine
+
         async with AsyncSessionLocal() as db:
             from app.pipelines.snapshot import run_snapshot_pipeline
-            return await run_snapshot_pipeline(url, db)
+
+            try:
+                return await run_snapshot_pipeline(url, db)
+            finally:
+                await engine.dispose()
 
     snapshot_id = asyncio.run(_run())
     log.info("task.snapshot.done", url=url, snapshot_id=str(snapshot_id))
