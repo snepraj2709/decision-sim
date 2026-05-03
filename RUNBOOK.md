@@ -564,3 +564,19 @@ Record local Step 3 verification here:
 - Linear: not live-verified in this run because integration was blocked by local Postgres/API quota.
 - example.com: not live-verified in this run because integration was blocked by local Postgres/API quota.
 - Vanta: not live-verified in this run because integration was blocked by local Postgres/API quota.
+
+## Step 4 verification (simulation pipeline)
+
+37 tests pass (32 unit + 5 integration).
+mypy strict: clean. ruff: clean.
+
+Live DB check (Linear, 2 pricing options):
+  - 6 cells produced (3 segments × 2 options) ✓
+  - Price +20%: mixed/negative sentiment ✓
+  - devil_advocate populated on all cells ✓
+  - example.com: 6 cells, all Low confidence ✓
+
+Known schema deviation from Step 4 spec:
+  - Column is option_letter not option_label (Claude Code used model field name)
+  - churn_probability stored as range_low/range_high not float
+  Update Step 5 frontend to read these actual column names.

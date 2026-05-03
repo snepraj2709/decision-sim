@@ -75,6 +75,19 @@ class CellResult:
     smallest_experiment: str
 
 
+def _embedding_as_list(embedding: object) -> list[float]:
+    """Normalize pgvector/numpy/list embeddings before confidence math."""
+    if embedding is None:
+        return []
+    if hasattr(embedding, "tolist"):
+        value = embedding.tolist()
+        if isinstance(value, list):
+            return [float(x) for x in value]
+    if isinstance(embedding, list):
+        return [float(x) for x in embedding]
+    return []
+
+
 def _baserate_agreement(option_type: str, sentiment: str) -> float:
     rates = BASE_RATES.get(option_type, BASE_RATES["feature"])
     return rates.get(sentiment, 0.25)
@@ -179,7 +192,7 @@ async def score_cells(
 
     # Collect all embeddings for stability calculation
     all_embeddings: dict[uuid.UUID, list[float]] = {
-        s.id: (s.embedding or [])
+        s.id: _embedding_as_list(s.embedding)
         for s in segments
     }
 
@@ -225,6 +238,11 @@ async def score_cells(
             construct_stability=stability,
         )
         confidence = triangulate(signals)
+
+        # Segment confidence is an upstream ceiling: hypothesis-mode segments
+        # should not produce higher-confidence simulation cells.
+        if segment.confidence == "low":
+            confidence = "low"
 
         # Force Low if the DSPy call itself failed
         if reaction.failed:
