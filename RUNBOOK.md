@@ -536,7 +536,22 @@ cd apps/api
 uv run pytest -v -m integration
 ```
 
+## Known limitations (accepted tradeoffs):
+- Filter may be aggressive on products with high SEO/comparison content
+  (e.g., Linear: 3/15 snippets survive). This is honest — thin signal
+  after filtering is correct behavior, not a bug.
+- LLM may produce identical names for distinct clusters when the 
+  underlying evidence themes are similar. Segments are distinct by 
+  evidence and embedding; name collision is cosmetic. Step 5 UI 
+  should display descriptor alongside name.
+
 If the database was recreated, regenerate Step 2 snapshots and update `tests/fixtures/snapshot_uuids.json`.
+
+### Step 4 cascade deletion risk
+
+ICP reruns delete and reinsert all `Segment` rows through the idempotency transaction in `score.py`. `SimulationCell` rows reference `segments.id` with `ondelete="CASCADE"`, so if Step 4 creates simulation cells and ICP is rerun afterward, all simulation cells for that snapshot will be deleted.
+
+Step 4 must choose one policy before simulations ship: prevent ICP reruns after simulation cells exist and return 409 for that `snapshot_id`, or delete and regenerate simulation cells as part of the ICP rerun workflow.
 
 ## Verification results
 

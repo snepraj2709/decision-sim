@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import re
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -25,26 +24,19 @@ import structlog
 
 from app.config import get_settings
 from app.models import EMBEDDING_DIM, ProductSnapshot
+from app.pipelines.icp._filters import (
+    MINIMUM_SNIPPET_LENGTH,
+    clean_snippet,
+    is_customer_evidence,
+)
 
 log = structlog.get_logger()
 
 # Minimum snippets needed for clustering to be meaningful
 MIN_SNIPPETS_FOR_CLUSTERING = 8
 
-# Patterns indicating non-customer content
-NON_CUSTOMER_PATTERNS = [
-    re.compile(r"privacy\s*policy", re.IGNORECASE),
-    re.compile(r"cookie\s*(policy|consent|banner|settings)", re.IGNORECASE),
-    re.compile(r"terms\s*(of\s*service|and\s*conditions)", re.IGNORECASE),
-    re.compile(r"gdpr|ccpa", re.IGNORECASE),
-    re.compile(r"we\s*use\s*cookies", re.IGNORECASE),
-    re.compile(r"accept\s*(all\s*)?cookies", re.IGNORECASE),
-    re.compile(r"manage\s*(your\s*)?preferences", re.IGNORECASE),
-    re.compile(r"unsubscribe|opt[\s-]?out", re.IGNORECASE),
-]
-
 # Minimum snippet length to be useful
-MIN_SNIPPET_LENGTH = 30
+MIN_SNIPPET_LENGTH = MINIMUM_SNIPPET_LENGTH
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +73,7 @@ class ClusterResult:
 
 def _is_non_customer_text(text: str) -> bool:
     """Check if text is likely non-customer content."""
-    return any(pattern.search(text) for pattern in NON_CUSTOMER_PATTERNS)
+    return not is_customer_evidence(text, "other")[0]
 
 
 def _extract_domain(url: str) -> str:
@@ -116,18 +108,8 @@ def _extract_snippets(snapshot: ProductSnapshot) -> tuple[list[str], list[Snippe
         if not isinstance(result, dict):
             continue
 
-        snippet = result.get("snippet", "")
-        if not snippet or not isinstance(snippet, str):
-            continue
-
-        # Filter short snippets
-        snippet = snippet.strip()
-        if len(snippet) < MIN_SNIPPET_LENGTH:
-            continue
-
-        # Filter non-customer text
-        if _is_non_customer_text(snippet):
-            log.debug("icp.cluster.filtered_non_customer", snippet=snippet[:50])
+        raw_snippet = result.get("snippet", "")
+        if not raw_snippet or not isinstance(raw_snippet, str):
             continue
 
         source = SnippetSource(
@@ -136,6 +118,20 @@ def _extract_snippets(snapshot: ProductSnapshot) -> tuple[list[str], list[Snippe
             source_kind=result.get("source_kind", "other"),
             published_date=result.get("published_date"),
         )
+
+        snippet = clean_snippet(raw_snippet, enforce_minimum_length=True)
+        if not snippet:
+            log.debug("icp.cluster.filtered_non_customer", reason="too_short_or_artifact")
+            continue
+
+        is_customer, reason = is_customer_evidence(snippet, source.source_kind)
+        if not is_customer:
+            log.debug(
+                "icp.cluster.filtered_non_customer",
+                reason=reason,
+                snippet=snippet[:50],
+            )
+            continue
 
         snippets.append(snippet)
         sources.append(source)

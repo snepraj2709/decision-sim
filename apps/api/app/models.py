@@ -226,6 +226,8 @@ class SimulationCell(Base):
     simulation_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("simulations.id", ondelete="CASCADE"), nullable=False
     )
+    # Step 3 ICP reruns delete and reinsert Segment rows. This CASCADE means
+    # Step 4 must block ICP reruns after cells exist, or regenerate cells too.
     segment_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("segments.id", ondelete="CASCADE"), nullable=False
     )

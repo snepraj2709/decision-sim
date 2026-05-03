@@ -51,6 +51,12 @@ Segments with fewer than two anchors are preserved but flagged. Stage 4 converts
 
 The geometric mean behavior in `triangulate()` is load-bearing. A segment with many anchors but poor coherence or poor distinctness still lands Low. This is intentional: an overconfident segment is more dangerous than a sparse segment that asks the user for better evidence.
 
+## Evidence Quality Tradeoffs
+
+The ICP pipeline treats public snippets as buyer/customer voice only when they pass fast regex filters. Press coverage and blog posts are excluded from synthesis and anchoring even when they may contain useful market context. This is deliberate: without LLM analysis at filter time, the pipeline cannot reliably tell first-party marketing, analyst summaries, and direct customer quotes apart, so it errs on the side of excluding them from customer evidence.
+
+Review aggregate metadata, employee-review content, pricing pages, comparison pages, and navigation boilerplate are also filtered before synthesis and anchoring. If this removes too much public signal, the correct product behavior is a thinner or lower-confidence ICP, not fabricating independent evidence.
+
 ## Testing
 
 Useful commands from `apps/api`:

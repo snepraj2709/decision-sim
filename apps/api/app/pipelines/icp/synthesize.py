@@ -11,12 +11,14 @@ This stage:
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import dataclass, field
 
 import structlog
 
 from app.config import get_settings
 from app.models import ProductSnapshot
+from app.pipelines.icp._filters import is_customer_evidence, is_invalid_segment_name
 from app.pipelines.icp.cluster import Cluster, ClusterResult
 
 log = structlog.get_logger()
@@ -24,6 +26,11 @@ log = structlog.get_logger()
 # Target number of segments
 TARGET_MIN_SEGMENTS = 3
 TARGET_MAX_SEGMENTS = 5
+
+SPECIFIC_NAME_RETRY_INSTRUCTION = (
+    "You must produce a specific segment name based on the evidence provided. "
+    "Do not return 'Unknown' or 'N/A'."
+)
 
 
 @dataclass
@@ -80,10 +87,79 @@ def _format_product_context(snapshot: ProductSnapshot) -> str:
     return "\n".join(parts) if parts else "No product context available."
 
 
+def _centroid_from_embeddings(embeddings: list[list[float]]) -> list[float]:
+    """Compute a normalized centroid for a filtered cluster."""
+    if not embeddings:
+        return []
+
+    dimensions = len(embeddings[0])
+    centroid = [
+        sum(embedding[i] for embedding in embeddings) / len(embeddings)
+        for i in range(dimensions)
+    ]
+    norm = math.sqrt(sum(value * value for value in centroid))
+    if norm > 1e-9:
+        centroid = [value / norm for value in centroid]
+    return centroid
+
+
+def _cluster_for_synthesis(
+    cluster: Cluster,
+    cluster_result: ClusterResult,
+    cluster_index: int,
+) -> Cluster | None:
+    """Return the cluster after removing snippets that are not customer voice."""
+    kept_indices: list[int] = []
+    kept_snippets: list[str] = []
+    kept_sources = []
+    kept_embeddings: list[list[float]] = []
+
+    for idx in cluster.member_indices:
+        if (
+            idx >= len(cluster_result.all_snippets)
+            or idx >= len(cluster_result.all_sources)
+            or idx >= len(cluster_result.all_embeddings)
+        ):
+            continue
+
+        snippet = cluster_result.all_snippets[idx]
+        source = cluster_result.all_sources[idx]
+        is_customer, reason = is_customer_evidence(snippet, source.source_kind)
+        if not is_customer:
+            log.debug(
+                "icp.synthesize.filtered_non_customer",
+                cluster_index=cluster_index,
+                reason=reason,
+                snippet_start=snippet[:80],
+            )
+            continue
+
+        kept_indices.append(idx)
+        kept_snippets.append(snippet)
+        kept_sources.append(source)
+        kept_embeddings.append(cluster_result.all_embeddings[idx])
+
+    if not kept_indices:
+        log.warning(
+            "icp.synthesize.skip_cluster_no_customer_evidence",
+            cluster_index=cluster_index,
+            original_size=len(cluster.member_indices),
+        )
+        return None
+
+    return Cluster(
+        centroid_embedding=_centroid_from_embeddings(kept_embeddings),
+        member_indices=kept_indices,
+        member_snippets=kept_snippets,
+        member_sources=kept_sources,
+    )
+
+
 async def _synthesize_with_dspy(
     cluster: Cluster,
     cluster_index: int,
     product_context: str,
+    prompt_addition: str = "",
 ) -> SynthesizedSegment:
     """Synthesize a segment using DSPy ChainOfThought."""
     import dspy  # type: ignore[import-untyped]
@@ -107,8 +183,6 @@ async def _synthesize_with_dspy(
     else:
         raise RuntimeError("No LLM API key configured")
 
-    dspy.configure(lm=lm)
-
     # Define the signature
     class SegmentSynthesis(dspy.Signature):  # type: ignore[misc]
         """Synthesize a customer segment from evidence quotes.
@@ -124,6 +198,9 @@ async def _synthesize_with_dspy(
         product_context: str = dspy.InputField(desc="Product information for context")
         quotes: str = dspy.InputField(desc="Numbered customer quotes to analyze")
         n_quotes: int = dspy.InputField(desc="Total number of quotes available")
+        synthesis_instructions: str = dspy.InputField(
+            desc="Additional hard requirements for this synthesis run"
+        )
 
         segment_name: str = dspy.OutputField(
             desc="Short segment name, e.g. 'College student, tier-2 city' (max 50 chars)"
@@ -152,12 +229,14 @@ async def _synthesize_with_dspy(
 
     # Run synthesis
     def _run_predict() -> dspy.Prediction:
-        predictor = dspy.ChainOfThought(SegmentSynthesis)
-        return predictor(
-            product_context=product_context,
-            quotes=quotes_text,
-            n_quotes=len(cluster.member_snippets),
-        )
+        with dspy.context(lm=lm):
+            predictor = dspy.ChainOfThought(SegmentSynthesis)
+            return predictor(
+                product_context=product_context,
+                quotes=quotes_text,
+                n_quotes=len(cluster.member_snippets),
+                synthesis_instructions=prompt_addition,
+            )
 
     result = await asyncio.to_thread(_run_predict)
 
@@ -199,12 +278,26 @@ async def _synthesize_with_dspy(
         log.warning("icp.synthesize.driver_parse_error", error=str(e))
         has_issues = True
 
+    segment_name = str(result.segment_name).strip()[:100] if result.segment_name else "Unknown"
+    descriptor = str(result.descriptor).strip()[:500] if result.descriptor else ""
+    job_to_be_done = str(result.job_to_be_done).strip()[:500] if result.job_to_be_done else ""
+    leaves = str(result.leaves_trigger).strip()[:300] if result.leaves_trigger else ""
+
+    if (
+        is_invalid_segment_name(segment_name)
+        or not descriptor
+        or not job_to_be_done
+        or not drivers
+        or not citations
+    ):
+        has_issues = True
+
     return SynthesizedSegment(
-        name=str(result.segment_name)[:100] if result.segment_name else "Unknown Segment",
-        descriptor=str(result.descriptor)[:500] if result.descriptor else "",
-        job_to_be_done=str(result.job_to_be_done)[:500] if result.job_to_be_done else "",
+        name=segment_name,
+        descriptor=descriptor,
+        job_to_be_done=job_to_be_done,
         drivers=drivers,
-        leaves=str(result.leaves_trigger)[:300] if result.leaves_trigger else "",
+        leaves=leaves,
         citations_used=citations,
         cluster_index=cluster_index,
         cluster_size=len(cluster.member_indices),
@@ -233,21 +326,46 @@ async def synthesize_segments(
 
     product_context = _format_product_context(snapshot)
 
-    # Take top clusters by size, up to TARGET_MAX_SEGMENTS
-    clusters_to_process = cluster_result.clusters[:TARGET_MAX_SEGMENTS]
-
     log.info(
         "icp.synthesize.start",
         snapshot_id=str(snapshot.id),
-        n_clusters=len(clusters_to_process),
+        n_clusters=len(cluster_result.clusters),
     )
 
     # Synthesize each cluster
     segments: list[SynthesizedSegment] = []
 
-    for i, cluster in enumerate(clusters_to_process):
+    for i, cluster in enumerate(cluster_result.clusters):
+        if len(segments) >= TARGET_MAX_SEGMENTS:
+            break
+
+        synthesis_cluster = _cluster_for_synthesis(cluster, cluster_result, i)
+        if synthesis_cluster is None:
+            continue
+
         try:
-            segment = await _synthesize_with_dspy(cluster, i, product_context)
+            segment = await _synthesize_with_dspy(synthesis_cluster, i, product_context)
+            if is_invalid_segment_name(segment.name):
+                log.warning(
+                    "icp.synthesize.invalid_name_retry",
+                    cluster_index=i,
+                    segment_name=segment.name,
+                )
+                segment = await _synthesize_with_dspy(
+                    synthesis_cluster,
+                    i,
+                    product_context,
+                    prompt_addition=SPECIFIC_NAME_RETRY_INSTRUCTION,
+                )
+
+            if is_invalid_segment_name(segment.name):
+                log.warning(
+                    "icp.synthesize.skip_invalid_name",
+                    cluster_index=i,
+                    segment_name=segment.name,
+                )
+                continue
+
             segments.append(segment)
             log.info(
                 "icp.synthesize.cluster_done",
@@ -260,22 +378,6 @@ async def synthesize_segments(
                 "icp.synthesize.cluster_failed",
                 cluster_index=i,
                 error=str(e),
-            )
-            # Create a minimal fallback segment
-            segments.append(
-                SynthesizedSegment(
-                    name=f"Segment {i + 1}",
-                    descriptor="Unable to synthesize segment description.",
-                    job_to_be_done="",
-                    drivers=[],
-                    leaves="",
-                    citations_used=[],
-                    cluster_index=i,
-                    cluster_size=len(cluster.member_indices),
-                    centroid_embedding=cluster.centroid_embedding,
-                    member_indices=cluster.member_indices,
-                    has_synthesis_issues=True,
-                )
             )
 
     # If we have fewer than TARGET_MIN_SEGMENTS and there are noise points,

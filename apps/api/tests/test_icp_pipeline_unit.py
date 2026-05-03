@@ -22,13 +22,16 @@ from app.core.confidence import (
     triangulate,
 )
 from app.models import EMBEDDING_DIM, ProductSnapshot
+from app.pipelines.icp._filters import clean_snippet, is_customer_evidence
 from app.pipelines.icp.anchor import (
     AnchoredSegment,
     EvidenceQuote,
     _truncate_at_sentence_boundary,
     anchor_segments,
+    deduplicate_evidence_across_segments,
 )
 from app.pipelines.icp.cluster import (
+    Cluster,
     ClusterResult,
     SnippetSource,
     _embed_snippets,
@@ -37,11 +40,16 @@ from app.pipelines.icp.cluster import (
     cluster_snippets,
 )
 from app.pipelines.icp.score import (
+    _prepare_segments_for_persistence,
     _count_unique_domains,
+    is_valid_segment,
+    merge_near_duplicate_segments,
+    truncate_segment_name,
 )
 from app.pipelines.icp.synthesize import (
     DriverWeight,
     SynthesizedSegment,
+    _cluster_for_synthesis,
 )
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -105,6 +113,49 @@ def _make_search_result(
     }
 
 
+def _make_evidence_quote(
+    quote: str,
+    embedding: list[float] | None = None,
+    kind: str = "reddit",
+) -> EvidenceQuote:
+    """Create an evidence quote for scoring/merge tests."""
+    return EvidenceQuote(
+        quote=quote,
+        source=kind,
+        source_url=f"https://{kind}.com/review",
+        kind=kind,
+        captured_at=None,
+        embedding=embedding or ([1.0] + [0.0] * (EMBEDDING_DIM - 1)),
+        domain=f"{kind}.com",
+    )
+
+
+def _make_anchored_segment(
+    name: str = "Software development teams",
+    share_pct: int = 50,
+    centroid_embedding: list[float] | None = None,
+    evidence_quotes: list[EvidenceQuote] | None = None,
+    drivers: list[dict[str, object]] | None = None,
+    job_to_be_done: str = "Ship software projects faster.",
+) -> AnchoredSegment:
+    """Create an anchored segment for unit tests."""
+    centroid = centroid_embedding or ([1.0] + [0.0] * (EMBEDDING_DIM - 1))
+    return AnchoredSegment(
+        name=name,
+        descriptor="A specific customer segment.",
+        job_to_be_done=job_to_be_done,
+        drivers=drivers if drivers is not None else [{"label": "Speed", "weight": 0.8}],
+        leaves="Slow workflows.",
+        centroid_embedding=centroid,
+        evidence_quotes=evidence_quotes if evidence_quotes is not None else [
+            _make_evidence_quote("Linear helps our team ship faster.", centroid)
+        ],
+        share_pct=share_pct,
+        has_few_anchors=False,
+        has_synthesis_issues=False,
+    )
+
+
 # ─── Test Non-Customer Text Filtering ───────────────────────────────────────
 
 class TestNonCustomerFiltering:
@@ -122,6 +173,62 @@ class TestNonCustomerFiltering:
 
     def test_review_not_filtered(self) -> None:
         assert not _is_non_customer_text("Great product, helped my team ship faster")
+
+
+def test_non_customer_evidence_filtered_before_synthesis() -> None:
+    """Glassdoor reviews and G2 rating metadata are filtered before synthesis."""
+    candidates = [
+        ("4.7 stars across 500 reviews", "g2"),
+        ("Great place to work, unlimited PTO and flexible remote culture", "glassdoor"),
+        ("Jira is slow; we switched to Linear for speed and simpler planning", "reddit"),
+    ]
+    cluster = Cluster(
+        centroid_embedding=[1.0] + [0.0] * (EMBEDDING_DIM - 1),
+        member_indices=[0, 1, 2],
+        member_snippets=[quote for quote, _source_kind in candidates],
+        member_sources=[
+            SnippetSource(
+                url=f"https://example.com/{i}",
+                title="",
+                source_kind=source_kind,
+                published_date=None,
+            )
+            for i, (_quote, source_kind) in enumerate(candidates)
+        ],
+    )
+    cluster_result = ClusterResult(
+        clusters=[cluster],
+        noise_indices=[],
+        total_snippets=3,
+        all_snippets=cluster.member_snippets,
+        all_sources=cluster.member_sources,
+        all_embeddings=[
+            [1.0, 0.0] + [0.0] * (EMBEDDING_DIM - 2),
+            [0.0, 1.0] + [0.0] * (EMBEDDING_DIM - 2),
+            [0.8, 0.2] + [0.0] * (EMBEDDING_DIM - 2),
+        ],
+    )
+
+    filtered_cluster = _cluster_for_synthesis(cluster, cluster_result, cluster_index=0)
+
+    assert filtered_cluster is not None
+    assert filtered_cluster.member_snippets == [
+        "Jira is slow; we switched to Linear for speed and simpler planning"
+    ]
+    assert is_customer_evidence(filtered_cluster.member_snippets[0], "reddit")[0]
+
+
+def test_snippet_cleaning_removes_url_artifacts() -> None:
+    """URL artifacts and HTML remnants are stripped before embedding."""
+    cases = {
+        "https://avatar.com John Smith is a developer": "John Smith is a developer",
+        "Https Avatar Individuals seeking domain management": "Individuals seeking domain management",
+        "&amp;amp; enterprise compliance teams": "enterprise compliance teams",
+        "![image](http://example.com/img.png) Linear ships fast": "Linear ships fast",
+    }
+
+    for raw, expected in cases.items():
+        assert clean_snippet(raw) == expected
 
 
 # ─── Test Quote Truncation ──────────────────────────────────────────────────
@@ -149,7 +256,7 @@ class TestSnippetExtraction:
     def test_extracts_valid_snippets(self) -> None:
         snapshot = _make_snapshot(search_results=[
             _make_search_result("This is a valid customer review that is long enough"),
-            _make_search_result("Another valid review from a real user"),
+            _make_search_result("Another valid review from a real user with enough detail"),
         ])
 
         snippets, sources = _extract_snippets(snapshot)
@@ -288,6 +395,62 @@ class TestConfidenceCalculation:
         assert confidence == "low"
 
 
+def test_unknown_segment_name_is_rejected() -> None:
+    """Synthesis output named 'Unknown' must be rejected before persistence."""
+    draft = _make_anchored_segment(
+        name="Unknown",
+        job_to_be_done="insufficient data",
+        drivers=[],
+    )
+
+    is_valid, reason = is_valid_segment(draft)
+
+    assert not is_valid
+    assert reason == "invalid_name"
+    assert _prepare_segments_for_persistence([draft]) == []
+
+
+def test_near_duplicate_segments_are_merged() -> None:
+    """Two segments with centroid similarity > 0.92 are merged."""
+    larger_embedding = [1.0, 0.0] + [0.0] * (EMBEDDING_DIM - 2)
+    smaller_embedding = [0.97, 0.03] + [0.0] * (EMBEDDING_DIM - 2)
+    larger = _make_anchored_segment(
+        name="Software development teams",
+        share_pct=60,
+        centroid_embedding=larger_embedding,
+        drivers=[{"label": "Speed", "weight": 0.8}],
+    )
+    smaller = _make_anchored_segment(
+        name="Developer teams seeking speed and simplicity",
+        share_pct=25,
+        centroid_embedding=smaller_embedding,
+        drivers=[{"label": "Simplicity", "weight": 0.6}],
+    )
+
+    merged = merge_near_duplicate_segments(
+        [larger, smaller],
+        [larger_embedding, smaller_embedding],
+    )
+
+    assert len(merged) == 1
+    assert merged[0].share_pct == 85
+    assert merged[0].name == "Software development teams"
+    assert {driver["label"] for driver in merged[0].drivers} == {"Speed", "Simplicity"}
+
+
+def test_segment_name_truncated_to_60_chars() -> None:
+    """Segment names longer than 60 characters are truncated at word boundary."""
+    name = (
+        "Hypothesis: Software development teams at Series B companies "
+        "seeking to replace legacy project management tooling"
+    )
+
+    truncated = truncate_segment_name(name)
+
+    assert truncated == "Hypothesis: Software development teams at Series B companies"
+    assert len(truncated) <= 60
+
+
 # ─── Test Cluster Stage ─────────────────────────────────────────────────────
 
 class TestClusterStage:
@@ -328,7 +491,7 @@ class TestClusterStage:
         """With <8 snippets, each becomes its own cluster."""
         snapshot = _make_snapshot(search_results=[
             _make_search_result("Customer review 1 about the product features"),
-            _make_search_result("Customer review 2 about pricing and value"),
+            _make_search_result("Customer review 2 about onboarding value for small teams"),
             _make_search_result("Customer review 3 about team collaboration"),
         ])
 
@@ -433,7 +596,7 @@ class TestAnchorStage:
             clusters=[],
             noise_indices=[],
             total_snippets=1,
-            all_snippets=["Single snippet with enough content"],
+            all_snippets=["Single customer snippet with enough content to anchor a segment"],
             all_sources=[SnippetSource(url="https://reddit.com/1", title="T",
                                        source_kind="reddit", published_date=None)],
             all_embeddings=[[1.0] + [0.0] * (EMBEDDING_DIM - 1)],
@@ -443,6 +606,83 @@ class TestAnchorStage:
 
         assert len(anchored) == 1
         assert anchored[0].has_few_anchors is True  # Only 1 anchor
+
+
+def test_evidence_deduplication_across_segments() -> None:
+    """When two clusters claim the same quote, only one segment keeps it."""
+    quote = "Linear is fast and intuitive for planning engineering work"
+    segment_evidence = {
+        0: [(quote, "reddit")],
+        1: [(quote, "reddit")],
+    }
+    quote_embedding = [0.95, 0.05] + [0.0] * (EMBEDDING_DIM - 2)
+
+    deduped = deduplicate_evidence_across_segments(
+        segment_evidence,
+        segment_centroids={
+            0: [1.0, 0.0] + [0.0] * (EMBEDDING_DIM - 2),
+            1: [0.0, 1.0] + [0.0] * (EMBEDDING_DIM - 2),
+        },
+        quote_embeddings={
+            (0, quote): quote_embedding,
+            (1, quote): quote_embedding,
+        },
+    )
+
+    assert deduped[0] == [(quote, "reddit")]
+    assert deduped[1] == []
+
+
+@pytest.mark.asyncio
+async def test_segment_dropped_when_zero_unique_evidence() -> None:
+    """A segment that loses all its evidence to deduplication is dropped."""
+    quote = "Linear is fast and intuitive for planning engineering work"
+    cluster_result = ClusterResult(
+        clusters=[],
+        noise_indices=[],
+        total_snippets=1,
+        all_snippets=[quote],
+        all_sources=[
+            SnippetSource(
+                url="https://reddit.com/r/linear/1",
+                title="Linear feedback",
+                source_kind="reddit",
+                published_date=None,
+            )
+        ],
+        all_embeddings=[[1.0, 0.0] + [0.0] * (EMBEDDING_DIM - 2)],
+    )
+    synthesized = [
+        SynthesizedSegment(
+            name="Speed-focused software teams",
+            descriptor="Teams want fast planning.",
+            job_to_be_done="Plan engineering work faster.",
+            drivers=[DriverWeight(label="Speed", weight=0.8)],
+            leaves="Slow workflows.",
+            citations_used=[0],
+            cluster_index=0,
+            cluster_size=1,
+            centroid_embedding=[1.0, 0.0] + [0.0] * (EMBEDDING_DIM - 2),
+            member_indices=[0],
+        ),
+        SynthesizedSegment(
+            name="Developer teams seeking simplicity",
+            descriptor="Teams want simple planning.",
+            job_to_be_done="Simplify engineering planning.",
+            drivers=[DriverWeight(label="Simplicity", weight=0.7)],
+            leaves="Complex workflows.",
+            citations_used=[0],
+            cluster_index=1,
+            cluster_size=1,
+            centroid_embedding=[0.0, 1.0] + [0.0] * (EMBEDDING_DIM - 2),
+            member_indices=[0],
+        ),
+    ]
+
+    anchored = await anchor_segments(synthesized, cluster_result)
+
+    assert len(anchored) == 1
+    assert anchored[0].evidence_quotes[0].quote == quote
 
 
 # ─── Test Full Pipeline Fixtures ────────────────────────────────────────────
@@ -456,10 +696,10 @@ class TestPipelineFixtures:
         # Create a rich snapshot with 30 snippets across 5 topics
         topics = [
             "The product is great for project management and tracking issues",
-            "Love the pricing, free tier is generous for small teams",
+            "Love the team workflow, setup is smooth for small teams",
             "Integration with GitHub and Slack works seamlessly",
             "The roadmap feature helps us plan sprints better",
-            "Customer support responded within an hour",
+            "Customer support responded within an hour with practical guidance",
         ]
 
         search_results = []
@@ -495,8 +735,8 @@ class TestPipelineFixtures:
         """Thin snapshot should produce segments with low confidence flags."""
         # Only 2 snippets - cold start case
         snapshot = _make_snapshot(search_results=[
-            _make_search_result("Some customer feedback about the product"),
-            _make_search_result("Another brief mention of the tool"),
+            _make_search_result("Some customer feedback about the product with useful detail"),
+            _make_search_result("Another brief mention of the tool from an actual user"),
         ])
 
         with patch("app.pipelines.icp.cluster._embed_snippets") as mock_embed:

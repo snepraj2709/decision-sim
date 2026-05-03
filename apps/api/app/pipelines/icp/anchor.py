@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from urllib.parse import urlparse
 
 import structlog
 
+from app.pipelines.icp._filters import is_customer_evidence
 from app.pipelines.icp.cluster import ClusterResult, SnippetSource
 from app.pipelines.icp.synthesize import SynthesizedSegment
 
@@ -72,6 +74,75 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
         return 0.0
 
     return dot / (norm_a * norm_b)
+
+
+def _quote_key(quote: str) -> str:
+    """Normalize quote text for cross-segment ownership checks."""
+    return " ".join(quote.split()).lower()
+
+
+def _lookup_quote_embedding(
+    quote_embeddings: Mapping[object, list[float]] | None,
+    segment_idx: int,
+    quote: str,
+) -> list[float]:
+    if quote_embeddings is None:
+        return []
+    return (
+        quote_embeddings.get((segment_idx, quote))
+        or quote_embeddings.get(quote)
+        or quote_embeddings.get(_quote_key(quote))
+        or []
+    )
+
+
+def deduplicate_evidence_across_segments(
+    segment_evidence: dict[int, list[tuple[str, str]]],
+    *,
+    segment_centroids: Mapping[int, list[float]] | None = None,
+    quote_embeddings: Mapping[object, list[float]] | None = None,
+) -> dict[int, list[tuple[str, str]]]:
+    """Ensure no quote appears in more than one segment."""
+    deduplicated: dict[int, list[tuple[str, str]]] = {
+        cluster_idx: [] for cluster_idx in segment_evidence
+    }
+    claims: dict[str, list[tuple[int, str, str]]] = {}
+
+    for cluster_idx, evidence_items in segment_evidence.items():
+        seen_in_segment: set[str] = set()
+        for quote_text, source_kind in evidence_items:
+            key = _quote_key(quote_text)
+            if not key or key in seen_in_segment:
+                continue
+            seen_in_segment.add(key)
+            claims.setdefault(key, []).append((cluster_idx, quote_text, source_kind))
+
+    for key, quote_claims in claims.items():
+        if len(quote_claims) == 1:
+            cluster_idx, quote_text, source_kind = quote_claims[0]
+            deduplicated[cluster_idx].append((quote_text, source_kind))
+            continue
+
+        def claim_score(claim: tuple[int, str, str]) -> tuple[float, int]:
+            cluster_idx, quote_text, _source_kind = claim
+            centroid = segment_centroids.get(cluster_idx, []) if segment_centroids else []
+            embedding = _lookup_quote_embedding(quote_embeddings, cluster_idx, quote_text)
+            return (_cosine_similarity(centroid, embedding), -cluster_idx)
+
+        winner_idx, winner_quote, winner_source_kind = max(quote_claims, key=claim_score)
+        deduplicated[winner_idx].append((winner_quote, winner_source_kind))
+        log.debug(
+            "anchor.evidence_deduplicated",
+            quote_key=key[:80],
+            winner_cluster=winner_idx,
+            losing_clusters=[
+                cluster_idx
+                for cluster_idx, _quote, _source_kind in quote_claims
+                if cluster_idx != winner_idx
+            ],
+        )
+
+    return deduplicated
 
 
 def _truncate_at_sentence_boundary(text: str, max_length: int = MAX_QUOTE_LENGTH) -> str:
@@ -156,10 +227,27 @@ def _select_best_anchors(
     similarities: list[tuple[int, float]] = []
 
     for idx in member_indices:
-        if idx < len(cluster_result.all_embeddings):
-            embedding = cluster_result.all_embeddings[idx]
-            sim = _cosine_similarity(centroid, embedding)
-            similarities.append((idx, sim))
+        if (
+            idx >= len(cluster_result.all_embeddings)
+            or idx >= len(cluster_result.all_snippets)
+            or idx >= len(cluster_result.all_sources)
+        ):
+            continue
+
+        snippet = cluster_result.all_snippets[idx]
+        source = cluster_result.all_sources[idx]
+        is_customer, reason = is_customer_evidence(snippet, source.source_kind)
+        if not is_customer:
+            log.debug(
+                "icp.anchor.filtered_non_customer",
+                reason=reason,
+                snippet_start=snippet[:80],
+            )
+            continue
+
+        embedding = cluster_result.all_embeddings[idx]
+        sim = _cosine_similarity(centroid, embedding)
+        similarities.append((idx, sim))
 
     # Sort by similarity descending
     similarities.sort(key=lambda x: x[1], reverse=True)
@@ -256,11 +344,58 @@ async def anchor_segments(
         )
         anchored.append(anchored_segment)
 
-    log.info(
-        "icp.anchor.done",
-        n_segments=len(anchored),
-        total_anchors=sum(len(s.evidence_quotes) for s in anchored),
-        segments_with_few_anchors=sum(1 for s in anchored if s.has_few_anchors),
+    dedupe_input = {
+        idx: [(evidence.quote, evidence.kind) for evidence in segment.evidence_quotes]
+        for idx, segment in enumerate(anchored)
+    }
+    deduped_evidence = deduplicate_evidence_across_segments(
+        dedupe_input,
+        segment_centroids={
+            idx: segment.centroid_embedding
+            for idx, segment in enumerate(anchored)
+        },
+        quote_embeddings={
+            (idx, evidence.quote): evidence.embedding
+            for idx, segment in enumerate(anchored)
+            for evidence in segment.evidence_quotes
+        },
     )
 
-    return anchored
+    unique_anchored: list[AnchoredSegment] = []
+    for idx, anchored_segment in enumerate(anchored):
+        allowed_keys = {
+            (_quote_key(quote), source_kind)
+            for quote, source_kind in deduped_evidence.get(idx, [])
+        }
+        seen_evidence: set[tuple[str, str]] = set()
+        unique_evidence_quotes: list[EvidenceQuote] = []
+        for evidence in anchored_segment.evidence_quotes:
+            key = (_quote_key(evidence.quote), evidence.kind)
+            if key not in allowed_keys or key in seen_evidence:
+                continue
+            seen_evidence.add(key)
+            unique_evidence_quotes.append(evidence)
+
+        if not unique_evidence_quotes:
+            log.warning(
+                "anchor.segment_dropped_no_unique_evidence",
+                segment_name=anchored_segment.name,
+            )
+            continue
+
+        unique_anchored.append(
+            replace(
+                anchored_segment,
+                evidence_quotes=unique_evidence_quotes,
+                has_few_anchors=len(unique_evidence_quotes) < TARGET_ANCHORS_MIN,
+            )
+        )
+
+    log.info(
+        "icp.anchor.done",
+        n_segments=len(unique_anchored),
+        total_anchors=sum(len(s.evidence_quotes) for s in unique_anchored),
+        segments_with_few_anchors=sum(1 for s in unique_anchored if s.has_few_anchors),
+    )
+
+    return unique_anchored

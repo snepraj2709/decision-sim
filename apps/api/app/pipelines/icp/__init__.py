@@ -107,6 +107,7 @@ async def run_icp_pipeline(
         snapshot_id=snapshot_id,
         anchored_segments=anchored,
         db=db,
+        snapshot=snapshot,
     )
     log.info("icp.pipeline.done", snapshot_id=str(snapshot_id), n_segments=len(segment_ids))
 
