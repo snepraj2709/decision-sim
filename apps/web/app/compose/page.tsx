@@ -16,7 +16,8 @@ import { ConfidenceBand } from "@/components/ui/confidence-band";
 
 const SNAPSHOT_MSG: Record<string, string> = {
   queued: "Scraping...",
-  started: "Extracting...",
+  started: "Searching...",
+  finished: "Extracting...",
 };
 
 const ICP_MSG: Record<string, string> = {
@@ -207,14 +208,6 @@ function StepURL({
           >
             {phase === "working" ? message : "Analyze"}
           </PrimaryButton>
-          {phase === "working" && (
-            <span
-              className="font-mono text-[12px]"
-              style={{ color: "var(--ink-3)" }}
-            >
-              {message}
-            </span>
-          )}
         </div>
       </form>
       {error && <ErrorMsg msg={error} />}
@@ -346,14 +339,6 @@ function StepSnapshot({
           {phase === "working" ? message : "Generate customer segments"}
         </PrimaryButton>
         <GhostButton onClick={onBack}>Back</GhostButton>
-        {phase === "working" && (
-          <span
-            className="font-mono text-[12px]"
-            style={{ color: "var(--ink-3)" }}
-          >
-            {message}
-          </span>
-        )}
       </div>
       {error && <ErrorMsg msg={error} />}
     </div>
@@ -770,14 +755,6 @@ function StepDecisions({
           {phase === "working" ? message : "Run simulation"}
         </PrimaryButton>
         <GhostButton onClick={onBack}>Back</GhostButton>
-        {phase === "working" && (
-          <span
-            className="font-mono text-[12px]"
-            style={{ color: "var(--ink-3)" }}
-          >
-            {message}
-          </span>
-        )}
       </div>
       {error && <ErrorMsg msg={error} />}
     </div>

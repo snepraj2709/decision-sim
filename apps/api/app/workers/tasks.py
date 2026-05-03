@@ -1,7 +1,9 @@
 """RQ task definitions — worker-side entry points.
 
 The pipelines themselves are async; RQ tasks are sync. We bridge with
-`asyncio.run` because each task gets its own process and event loop.
+`asyncio.run`, and each task must create and dispose its own async engine
+inside that event loop. asyncpg pools keep loop references, so sharing the
+FastAPI process engine/sessionmaker across RQ jobs can poison later jobs.
 
 Run a worker:
     uv run rq worker --url redis://localhost:6379
@@ -17,8 +19,6 @@ import uuid
 
 import structlog
 
-from app.db import AsyncSessionLocal
-
 log = structlog.get_logger()
 
 
@@ -30,33 +30,76 @@ def task_run_snapshot(url: str) -> str:
     """
     log.info("task.snapshot.start", url=url)
 
-    async def _run() -> uuid.UUID:
-        from app.db import engine
+    async def _run() -> str:
+        from sqlalchemy.ext.asyncio import (
+            AsyncSession,
+            async_sessionmaker,
+            create_async_engine,
+        )
 
-        async with AsyncSessionLocal() as db:
-            from app.pipelines.snapshot import run_snapshot_pipeline
+        from app.config import get_settings
 
-            try:
-                return await run_snapshot_pipeline(url, db)
-            finally:
-                await engine.dispose()
+        settings = get_settings()
+        engine = create_async_engine(
+            settings.database_url,
+            pool_pre_ping=True,
+            pool_size=1,
+            max_overflow=0,
+        )
+
+        try:
+            async with async_sessionmaker(
+                engine,
+                class_=AsyncSession,
+                expire_on_commit=False,
+            )() as db:
+                from app.pipelines.snapshot import run_snapshot_pipeline
+
+                snapshot_id = await run_snapshot_pipeline(url, db)
+                return str(snapshot_id)
+        finally:
+            await engine.dispose()
 
     snapshot_id = asyncio.run(_run())
-    log.info("task.snapshot.done", url=url, snapshot_id=str(snapshot_id))
-    return str(snapshot_id)
+    log.info("task.snapshot.done", url=url, snapshot_id=snapshot_id)
+    return snapshot_id
 
 
 def task_run_icps(snapshot_id: str) -> list[str]:
     """Worker task — wraps the ICP pipeline. Step 3 implements."""
     log.info("task.icps.start", snapshot_id=snapshot_id)
 
-    async def _run() -> list[uuid.UUID]:
-        async with AsyncSessionLocal() as db:
-            from app.pipelines.icp import run_icp_pipeline
-            return await run_icp_pipeline(uuid.UUID(snapshot_id), db)
+    async def _run() -> list[str]:
+        from sqlalchemy.ext.asyncio import (
+            AsyncSession,
+            async_sessionmaker,
+            create_async_engine,
+        )
 
-    ids = asyncio.run(_run())
-    return [str(i) for i in ids]
+        from app.config import get_settings
+
+        settings = get_settings()
+        engine = create_async_engine(
+            settings.database_url,
+            pool_pre_ping=True,
+            pool_size=1,
+            max_overflow=0,
+        )
+
+        try:
+            async with async_sessionmaker(
+                engine,
+                class_=AsyncSession,
+                expire_on_commit=False,
+            )() as db:
+                from app.pipelines.icp import run_icp_pipeline
+
+                ids = await run_icp_pipeline(uuid.UUID(snapshot_id), db)
+                return [str(i) for i in ids]
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(_run())
 
 
 def task_run_simulation(simulation_id: str) -> None:
@@ -64,8 +107,32 @@ def task_run_simulation(simulation_id: str) -> None:
     log.info("task.simulation.start", simulation_id=simulation_id)
 
     async def _run() -> None:
-        async with AsyncSessionLocal() as db:
-            from app.pipelines.simulation import run_simulation
-            await run_simulation(uuid.UUID(simulation_id), db)
+        from sqlalchemy.ext.asyncio import (
+            AsyncSession,
+            async_sessionmaker,
+            create_async_engine,
+        )
+
+        from app.config import get_settings
+
+        settings = get_settings()
+        engine = create_async_engine(
+            settings.database_url,
+            pool_pre_ping=True,
+            pool_size=1,
+            max_overflow=0,
+        )
+
+        try:
+            async with async_sessionmaker(
+                engine,
+                class_=AsyncSession,
+                expire_on_commit=False,
+            )() as db:
+                from app.pipelines.simulation import run_simulation
+
+                await run_simulation(uuid.UUID(simulation_id), db)
+        finally:
+            await engine.dispose()
 
     asyncio.run(_run())

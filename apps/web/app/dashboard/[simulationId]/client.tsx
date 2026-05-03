@@ -23,6 +23,10 @@ const SENTIMENT_COLOR: Record<string, string> = {
   mixed: "var(--conf-med)",
 };
 
+const GRID_HEADER_STICKY_TOP = 0;
+const GRID_HEADER_ROW_MIN_HEIGHT = 88;
+const GRID_DATA_ROW_MIN_HEIGHT = 104;
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 // cell.option_letter = the original DecisionOption.label (e.g. "Price +20%")
@@ -346,8 +350,10 @@ export function DashboardClient({
         >
           {/* Header row */}
           <div
-            className="sticky top-[49px] z-10 px-4 py-3"
+            className="sticky z-20 px-4 py-4"
             style={{
+              top: GRID_HEADER_STICKY_TOP,
+              minHeight: GRID_HEADER_ROW_MIN_HEIGHT,
               background: "var(--bg-elevated)",
               borderBottom: "1px solid var(--line-strong)",
               borderRight: "1px solid var(--line)",
@@ -358,8 +364,10 @@ export function DashboardClient({
             return (
               <div
                 key={letter}
-                className="sticky top-[49px] z-10 px-4 py-3"
+                className="sticky z-20 px-4 py-4 flex flex-col justify-center"
                 style={{
+                  top: GRID_HEADER_STICKY_TOP,
+                  minHeight: GRID_HEADER_ROW_MIN_HEIGHT,
                   background: "var(--bg-elevated)",
                   borderBottom: "1px solid var(--line-strong)",
                   borderLeft: "1px solid var(--line)",
@@ -392,6 +400,7 @@ export function DashboardClient({
                 <div
                   className={`px-4 py-4 ${isLow ? "lc-grain" : ""}`}
                   style={{
+                    minHeight: GRID_DATA_ROW_MIN_HEIGHT,
                     background: "var(--bg-elevated)",
                     borderBottom: "1px solid var(--line)",
                     borderRight: "1px solid var(--line)",
@@ -432,6 +441,7 @@ export function DashboardClient({
                       <div
                         key={`empty-${seg.id}-${letter}`}
                         style={{
+                          minHeight: GRID_DATA_ROW_MIN_HEIGHT,
                           background: "var(--bg-elevated)",
                           borderBottom: "1px solid var(--line)",
                           borderLeft: "1px solid var(--line)",
@@ -444,11 +454,14 @@ export function DashboardClient({
                     <div
                       key={`${seg.id}-${letter}`}
                       className="relative"
-                      style={{ borderBottom: "1px solid var(--line)" }}
+                      style={{
+                        minHeight: GRID_DATA_ROW_MIN_HEIGHT,
+                        borderBottom: "1px solid var(--line)",
+                      }}
                     >
                       {cell.reaction_sentiment && (
                         <span
-                          className="absolute top-2.5 left-4 z-10 pointer-events-none font-mono text-[12px] font-semibold"
+                          className="absolute top-2.5 left-4 z-[1] pointer-events-none font-mono text-[12px] font-semibold"
                           style={{
                             color:
                               SENTIMENT_COLOR[cell.reaction_sentiment] ??

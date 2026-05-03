@@ -65,12 +65,12 @@ cd apps/api && uv run fastapi dev app/main.py
 # OpenAPI UI at http://localhost:8000/docs
 
 # Terminal 2 — RQ worker
-cd apps/api && uv run rq worker --url redis://localhost:6379
+cd apps/api && uv run rq worker --worker-class rq.SimpleWorker --url redis://localhost:6379
 # Should log: Worker ... started with PID ...
 # (No tasks will arrive in Step 1 — just proves the connection works.)
 
 # Terminal 3 — frontend
-pnpm --filter web dev
+cd apps/web && pnpm dev
 # Visit http://localhost:3000
 ```
 
@@ -580,3 +580,7 @@ Known schema deviation from Step 4 spec:
   - Column is option_letter not option_label (Claude Code used model field name)
   - churn_probability stored as range_low/range_high not float
   Update Step 5 frontend to read these actual column names.
+
+Known Step 5 limitation: progress state labels (Scraping/Searching/
+Extracting) may not all be visible if the pipeline completes before
+the next poll interval. This is cosmetic — data integrity is unaffected.

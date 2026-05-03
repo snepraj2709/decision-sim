@@ -268,87 +268,96 @@ export default function HomePage() {
 
             <div className="flex flex-col gap-3">
               {recent.map((item, i) => (
-                <button
+                <div
                   key={`${item.snapshotId}-${i}`}
-                  onClick={() =>
-                    router.push(`/compose?snapshotId=${item.snapshotId}`)
-                  }
-                  className="w-full text-left rounded-lg p-4 transition-colors"
+                  className="relative rounded-lg transition-colors"
                   style={{
                     background: "var(--bg-elevated)",
                     border: "1px solid var(--line)",
                   }}
                 >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div
-                        className="font-mono text-[13px] font-medium truncate"
-                        style={{ color: "var(--ink)" }}
-                      >
-                        {urlHost(item.url)}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      router.push(`/compose?snapshotId=${item.snapshotId}`)
+                    }
+                    className="w-full rounded-lg p-4 text-left"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div
+                          className="font-mono text-[13px] font-medium truncate"
+                          style={{ color: "var(--ink)" }}
+                        >
+                          {urlHost(item.url)}
+                        </div>
+                        <div
+                          className="text-[12px] mt-0.5 truncate font-mono"
+                          style={{ color: "var(--ink-3)" }}
+                        >
+                          {item.url}
+                        </div>
                       </div>
                       <div
-                        className="text-[12px] mt-0.5 truncate font-mono"
+                        className="font-mono text-[11px] shrink-0"
                         style={{ color: "var(--ink-3)" }}
                       >
-                        {item.url}
+                        {relativeDate(item.snapshotCreatedAt)}
                       </div>
                     </div>
-                    <div
-                      className="font-mono text-[11px] shrink-0"
-                      style={{ color: "var(--ink-3)" }}
-                    >
-                      {relativeDate(item.snapshotCreatedAt)}
-                    </div>
-                  </div>
 
-                  <div className="mt-3 flex items-center gap-4">
                     <div
-                      className="font-mono text-[11px]"
-                      style={{ color: "var(--ink-3)" }}
+                      className={`mt-3 flex items-center gap-4 ${
+                        item.simulationId ? "pr-32" : ""
+                      }`}
                     >
-                      {item.segmentCount} segments
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {item.confidenceSummary.high > 0 && (
-                        <span
-                          className="font-mono text-[11px]"
-                          style={{ color: "var(--conf-high)" }}
-                        >
-                          H:{item.confidenceSummary.high}
-                        </span>
-                      )}
-                      {item.confidenceSummary.medium > 0 && (
-                        <span
-                          className="font-mono text-[11px]"
-                          style={{ color: "var(--conf-med)" }}
-                        >
-                          M:{item.confidenceSummary.medium}
-                        </span>
-                      )}
-                      {item.confidenceSummary.low > 0 && (
-                        <span
-                          className="font-mono text-[11px]"
-                          style={{ color: "var(--conf-low)" }}
-                        >
-                          L:{item.confidenceSummary.low}
-                        </span>
-                      )}
-                    </div>
-                    {item.simulationId && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          router.push(`/dashboard/${item.simulationId}`);
-                        }}
-                        className="ml-auto font-mono text-[11px]"
-                        style={{ color: "var(--accent)" }}
+                      <div
+                        className="font-mono text-[11px]"
+                        style={{ color: "var(--ink-3)" }}
                       >
-                        View dashboard →
-                      </button>
-                    )}
-                  </div>
-                </button>
+                        {item.segmentCount} segments
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {item.confidenceSummary.high > 0 && (
+                          <span
+                            className="font-mono text-[11px]"
+                            style={{ color: "var(--conf-high)" }}
+                          >
+                            H:{item.confidenceSummary.high}
+                          </span>
+                        )}
+                        {item.confidenceSummary.medium > 0 && (
+                          <span
+                            className="font-mono text-[11px]"
+                            style={{ color: "var(--conf-med)" }}
+                          >
+                            M:{item.confidenceSummary.medium}
+                          </span>
+                        )}
+                        {item.confidenceSummary.low > 0 && (
+                          <span
+                            className="font-mono text-[11px]"
+                            style={{ color: "var(--conf-low)" }}
+                          >
+                            L:{item.confidenceSummary.low}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </button>
+                  {item.simulationId && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        router.push(`/dashboard/${item.simulationId}`)
+                      }
+                      className="absolute bottom-4 right-4 z-10 font-mono text-[11px]"
+                      style={{ color: "var(--accent)" }}
+                    >
+                      View dashboard →
+                    </button>
+                  )}
+                </div>
               ))}
             </div>
           </section>
