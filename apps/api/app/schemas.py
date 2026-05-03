@@ -155,6 +155,10 @@ class SimulationCellRead(BaseModel):
     reasoning_trace: str | None
     top_concern: str | None
     invalidating_experiment: str | None
+    reaction_sentiment: str | None = None
+    adoption_probability: float | None = None
+    time_horizon: str | None = None
+    devil_advocate: str | None = None
 
 
 class SimulationRead(BaseModel):
@@ -175,3 +179,37 @@ class SimulationCreateRequest(BaseModel):
     snapshot_id: uuid.UUID
     decision_type: DecisionType
     options: list[OptionInput] = Field(min_length=2, max_length=4)
+
+
+# ── Step 4 simulation schemas ────────────────────────────────────────────────
+OptionType = Literal["pricing", "copy", "feature", "bundling", "onboarding"]
+
+
+class DecisionOption(BaseModel):
+    """One option in a simulate request."""
+
+    label: str = Field(min_length=1, max_length=64)
+    description: str = Field(min_length=1, max_length=500)
+    option_type: OptionType
+
+
+class SimulateRequest(BaseModel):
+    """Body for POST /snapshots/{snapshot_id}/simulate."""
+
+    options: list[DecisionOption] = Field(min_length=2, max_length=5)
+
+
+class SimulationJobResponse(BaseModel):
+    """Returned when a simulation job is enqueued."""
+
+    simulation_id: uuid.UUID
+    job_id: str
+    status_url: str
+
+
+class SimulationJobStatus(BaseModel):
+    """Status of a running simulation job."""
+
+    status: JobStatus
+    simulation_id: uuid.UUID | None = None
+    error: str | None = None

@@ -104,7 +104,10 @@ class TestCreateICPsEndpoint:
         mock_queue.enqueue.return_value = mock_job
 
         with (
-            _override_db([_ExecuteResult(scalar=snapshot_id)]),
+            _override_db([
+                _ExecuteResult(scalar=snapshot_id),  # snapshot lookup
+                _ExecuteResult(scalar=None),          # simulation cells check (none exist)
+            ]),
             patch("app.api.v1.segments._get_queue", return_value=mock_queue),
         ):
             response = await client.post(f"/api/v1/snapshots/{snapshot_id}/icps")

@@ -28,6 +28,7 @@ from pgvector.sqlalchemy import Vector  # type: ignore[import-untyped]
 from sqlalchemy import (
     JSON,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -231,12 +232,17 @@ class SimulationCell(Base):
     segment_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("segments.id", ondelete="CASCADE"), nullable=False
     )
-    option_letter: Mapped[str] = mapped_column(String(2), nullable=False)  # 'A', 'B', 'C'
+    option_letter: Mapped[str] = mapped_column(String(64), nullable=False)
     range_low: Mapped[int] = mapped_column(Integer, nullable=False)   # churn % low end
     range_high: Mapped[int] = mapped_column(Integer, nullable=False)  # churn % high end
     confidence: Mapped[str] = mapped_column(String(8), nullable=False)
     reasoning_trace: Mapped[str | None] = mapped_column(Text)
     top_concern: Mapped[str | None] = mapped_column(String(256))
     invalidating_experiment: Mapped[str | None] = mapped_column(Text)
+    # Columns added in Step 4
+    reaction_sentiment: Mapped[str | None] = mapped_column(String(16))
+    adoption_probability: Mapped[float | None] = mapped_column(Float())
+    time_horizon: Mapped[str | None] = mapped_column(String(16))
+    devil_advocate: Mapped[str | None] = mapped_column(Text)
 
     simulation: Mapped[Simulation] = relationship(back_populates="cells")
