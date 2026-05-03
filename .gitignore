@@ -8,6 +8,7 @@ venv/
 
 # Build outputs
 .next/
+.next.stale-section-d/
 dist/
 build/
 *.egg-info/
@@ -41,6 +42,7 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 coverage/
+.playwright-mcp/
 
 # Turbo
 .turbo/

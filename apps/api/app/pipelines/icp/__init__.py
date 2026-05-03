@@ -36,6 +36,7 @@ import uuid
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.pipelines.demo_cache import get_or_create_cached_segments
 from app.pipelines.icp.anchor import anchor_segments
 from app.pipelines.icp.cluster import cluster_snippets
 from app.pipelines.icp.score import score_and_persist
@@ -76,6 +77,15 @@ async def run_icp_pipeline(
 
     if snapshot is None:
         raise ValueError(f"Snapshot {snapshot_id} not found")
+
+    cached_segment_ids = await get_or_create_cached_segments(snapshot_id, db)
+    if cached_segment_ids is not None:
+        log.info(
+            "icp.pipeline.cache_return",
+            snapshot_id=str(snapshot_id),
+            n_segments=len(cached_segment_ids),
+        )
+        return cached_segment_ids
 
     # Stage 1: Cluster
     log.info("icp.stage.cluster.start", snapshot_id=str(snapshot_id))

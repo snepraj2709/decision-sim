@@ -28,6 +28,7 @@ import uuid
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.pipelines.demo_cache import get_or_create_cached_snapshot_id
 from app.pipelines.snapshot.extract import run_extraction
 from app.pipelines.snapshot.score import score_and_persist
 from app.pipelines.snapshot.scrape import ScrapeError, run_scrape
@@ -57,6 +58,15 @@ async def run_snapshot_pipeline(
         ExtractionError: When DSPy program produces no usable output.
     """
     log.info("snapshot.pipeline.start", url=url)
+
+    cached_snapshot_id = await get_or_create_cached_snapshot_id(url, db)
+    if cached_snapshot_id is not None:
+        log.info(
+            "snapshot.pipeline.cache_return",
+            url=url,
+            snapshot_id=str(cached_snapshot_id),
+        )
+        return cached_snapshot_id
 
     # Stage 1: Scrape
     log.info("snapshot.stage.scrape.start", url=url)

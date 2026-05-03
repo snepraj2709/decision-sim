@@ -19,6 +19,7 @@ from sqlalchemy.orm import selectinload
 from app.api.deps import DbSession
 from app.config import get_settings
 from app.models import ProductSnapshot, Segment, SimulationCell
+from app.pipelines.demo_cache import get_or_create_cached_segments
 from app.schemas import (
     DriverWeight,
     EvidenceRead,
@@ -97,24 +98,26 @@ async def create_icps(snapshot_id: uuid.UUID, db: DbSession) -> ICPJobResponse:
             detail=f"Snapshot {snapshot_id} not found",
         )
 
-    # Block ICP reruns when simulation cells already exist for this snapshot.
-    # Rerunning ICP deletes and reinserts Segment rows, cascading to
-    # SimulationCell rows — destroying simulation results silently.
-    cells_stmt = (
-        select(SimulationCell.id)
-        .join(Segment, SimulationCell.segment_id == Segment.id)
-        .where(Segment.snapshot_id == snapshot_id)
-        .limit(1)
-    )
-    cells_result = await db.execute(cells_stmt)
-    if cells_result.scalar_one_or_none() is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "Cannot rerun ICP: simulation cells already exist for this snapshot. "
-                "Delete the simulation before regenerating segments."
-            ),
+    cached_segments = await get_or_create_cached_segments(snapshot_id, db)
+    if cached_segments is None:
+        # Block ICP reruns when simulation cells already exist for this snapshot.
+        # Rerunning ICP deletes and reinserts Segment rows, cascading to
+        # SimulationCell rows — destroying simulation results silently.
+        cells_stmt = (
+            select(SimulationCell.id)
+            .join(Segment, SimulationCell.segment_id == Segment.id)
+            .where(Segment.snapshot_id == snapshot_id)
+            .limit(1)
         )
+        cells_result = await db.execute(cells_stmt)
+        if cells_result.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Cannot rerun ICP: simulation cells already exist for this snapshot. "
+                    "Delete the simulation before regenerating segments."
+                ),
+            )
 
     queue = _get_queue()
 

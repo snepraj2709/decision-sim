@@ -106,6 +106,7 @@ class TestCreateICPsEndpoint:
         with (
             _override_db([
                 _ExecuteResult(scalar=snapshot_id),  # snapshot lookup
+                _ExecuteResult(scalar=None),          # demo cache host lookup
                 _ExecuteResult(scalar=None),          # simulation cells check (none exist)
             ]),
             patch("app.api.v1.segments._get_queue", return_value=mock_queue),

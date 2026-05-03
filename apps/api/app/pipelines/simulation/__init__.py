@@ -23,6 +23,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.models import Segment, Simulation
+from app.pipelines.demo_cache import complete_cached_simulation_if_available
 from app.pipelines.simulation.parse import parse_options
 from app.pipelines.simulation.persist import persist_cells
 from app.pipelines.simulation.react import generate_reactions
@@ -60,6 +61,10 @@ async def run_simulation(
 
     if simulation is None:
         raise ValueError(f"Simulation {simulation_id} not found")
+
+    if await complete_cached_simulation_if_available(simulation, db):
+        log.info("simulation.pipeline.cache_return", simulation_id=str(simulation_id))
+        return
 
     simulation.status = "running"
     await db.commit()

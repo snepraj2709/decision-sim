@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     # ── Feature flags ────────────────────────────────────────────────────
     require_evidence_anchors: bool = True
     min_sources_for_high_confidence: int = 3
+    demo_cache_enabled: bool = True
+    demo_cache_hosts_raw: str = Field(
+        default="netflix.com",
+        validation_alias=AliasChoices("DEMO_CACHE_HOSTS", "demo_cache_hosts"),
+    )
 
     @property
     def cors_origins(self) -> list[str]:
@@ -65,6 +70,15 @@ class Settings(BaseSettings):
             for origin in self.cors_origins_raw.split(",")
             if origin.strip()
         ]
+
+    @property
+    def demo_cache_hosts(self) -> set[str]:
+        """Return normalized hosts that should use deterministic demo fixtures."""
+        return {
+            host.strip().lower().removeprefix("www.")
+            for host in self.demo_cache_hosts_raw.split(",")
+            if host.strip()
+        }
 
 
 @lru_cache
