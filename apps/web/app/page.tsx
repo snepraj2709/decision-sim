@@ -223,8 +223,11 @@ function CalibrationModal({
                 color: "var(--ink)",
               }}
             >
-              {options.map((o) => (
-                <option key={o.letter} value={o.letter}>
+              {options.map((o, index) => (
+                <option
+                  key={`${o.letter}-${o.title}-${index}`}
+                  value={o.letter}
+                >
                   {o.letter}
                 </option>
               ))}
@@ -644,9 +647,9 @@ export default function HomePage() {
 
                   {item.predictedSentiments.length > 0 && (
                     <div className="mt-3 flex flex-wrap gap-3">
-                      {item.predictedSentiments.map((ps) => (
+                      {item.predictedSentiments.map((ps, index) => (
                         <div
-                          key={ps.optionLetter}
+                          key={`${ps.optionLetter}-${ps.optionTitle}-${ps.sentiment ?? "none"}-${index}`}
                           className="flex items-center gap-1.5"
                         >
                           <span

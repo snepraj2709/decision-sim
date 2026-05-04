@@ -138,7 +138,7 @@ class SegmentRead(BaseModel):
 
 # ── Simulation ──────────────────────────────────────────────────────────────
 class OptionInput(BaseModel):
-    letter: str = Field(min_length=1, max_length=2)
+    letter: str = Field(min_length=1, max_length=64)
     title: str = Field(min_length=1, max_length=128)
     sub: str | None = Field(default=None, max_length=512)
 

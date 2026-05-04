@@ -73,7 +73,7 @@ def _sim_to_read(sim: Simulation) -> SimulationRead:
 
     options = [
         OptionInput(
-            letter=str(opt.get("label", ""))[:2],
+            letter=str(opt.get("label", "")),
             title=str(opt.get("description", ""))[:128],
             sub=None,
         )
