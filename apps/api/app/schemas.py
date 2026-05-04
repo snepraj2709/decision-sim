@@ -213,3 +213,43 @@ class SimulationJobStatus(BaseModel):
     status: JobStatus
     simulation_id: uuid.UUID | None = None
     error: str | None = None
+
+
+# ── Calibration (Step 6) ─────────────────────────────────────────────────────
+ReportedSentiment = Literal["positive", "neutral", "negative", "mixed"]
+
+
+class OutcomeReportCreate(BaseModel):
+    option_letter: str = Field(min_length=1, max_length=64)
+    reported_sentiment: ReportedSentiment
+    notes: str | None = Field(default=None, max_length=500)
+
+
+class OutcomeReportRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    simulation_id: uuid.UUID
+    option_letter: str
+    reported_sentiment: str
+    reported_at: datetime
+    notes: str | None
+
+
+class CalibrationRateRead(BaseModel):
+    rate: float
+    sample_count: int
+
+
+class CalibrationRatesResponse(BaseModel):
+    """GET /calibration/rates — nested by option_type → sentiment → {rate, sample_count}."""
+
+    rates: dict[str, dict[str, CalibrationRateRead]]
+
+
+class AccuracySummary(BaseModel):
+    predicted: str | None
+    reported: str
+    match: bool
+    option_letter: str
+    simulation_id: str

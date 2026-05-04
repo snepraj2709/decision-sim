@@ -18,14 +18,15 @@ from app.core.confidence import (
     evidence_density_from_count,
     triangulate,
 )
-from app.models import Segment
+from app.models import CalibrationRate, Segment
 from app.pipelines.simulation.parse import ParsedOption
 from app.pipelines.simulation.react import ReactionResult
 
 log = structlog.get_logger()
 
-# BASE_RATES are Step 4 placeholders.
-# Step 6 replaces with calibrated rates from outcome tracking.
+# Hardcoded fallback — used when the CalibrationRate table has no row for a
+# given (option_type, sentiment). Should only occur if the DB was wiped or the
+# migration was skipped.
 BASE_RATES: dict[str, dict[str, float]] = {
     "pricing": {
         "positive": 0.10,
@@ -60,6 +61,35 @@ BASE_RATES: dict[str, dict[str, float]] = {
 }
 
 
+async def _load_calibration_rates() -> dict[str, dict[str, float]]:
+    """Fetch all CalibrationRate rows into a nested dict for use during scoring.
+
+    Falls back to BASE_RATES if the table is empty (e.g. migration not run).
+    One DB round-trip per score_cells() call, not per cell.
+    """
+    from sqlalchemy import select
+
+    from app.db import AsyncSessionLocal
+
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(CalibrationRate))
+            rows = result.scalars().all()
+        if not rows:
+            log.warning("simulation.score.calibration_table_empty_using_hardcoded_fallback")
+            return BASE_RATES
+        rates: dict[str, dict[str, float]] = {}
+        for row in rows:
+            rates.setdefault(row.option_type, {})[row.sentiment] = row.rate
+        return rates
+    except Exception as exc:
+        log.warning(
+            "simulation.score.calibration_load_failed_using_hardcoded_fallback",
+            error=str(exc),
+        )
+        return BASE_RATES
+
+
 @dataclass
 class CellResult:
     segment_id: uuid.UUID
@@ -88,9 +118,14 @@ def _embedding_as_list(embedding: object) -> list[float]:
     return []
 
 
-def _baserate_agreement(option_type: str, sentiment: str) -> float:
-    rates = BASE_RATES.get(option_type, BASE_RATES["feature"])
-    return rates.get(sentiment, 0.25)
+def _baserate_agreement(
+    option_type: str,
+    sentiment: str,
+    rates: dict[str, dict[str, float]] | None = None,
+) -> float:
+    lookup = rates if rates is not None else BASE_RATES
+    type_rates = lookup.get(option_type, lookup.get("feature", {}))
+    return type_rates.get(sentiment, 0.25)
 
 
 def _churn_range(churn_probability: float) -> tuple[int, int]:
@@ -190,6 +225,9 @@ async def score_cells(
     seg_by_id: dict[uuid.UUID, Segment] = {s.id: s for s in segments}
     opt_by_label: dict[str, ParsedOption] = {o.label: o for o in parsed_options}
 
+    # One DB round-trip for calibrated rates; falls back to BASE_RATES if needed.
+    calibration_rates = await _load_calibration_rates()
+
     # Collect all embeddings for stability calculation
     all_embeddings: dict[uuid.UUID, list[float]] = {
         s.id: _embedding_as_list(s.embedding)
@@ -217,11 +255,13 @@ async def score_cells(
             min_for_high=min_sources,
         )
 
-        # Signal 2: llm_baserate_agreement from lookup table
+        # Signal 2: llm_baserate_agreement — read from DB-calibrated rates
         if reaction.failed:
             baserate = 0.0
         else:
-            baserate = _baserate_agreement(option.option_type, reaction.reaction_sentiment)
+            baserate = _baserate_agreement(
+                option.option_type, reaction.reaction_sentiment, calibration_rates
+            )
 
         # Signal 3: construct_stability — how distinct this segment is
         seg_embedding = all_embeddings.get(reaction.segment_id, [])

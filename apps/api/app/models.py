@@ -11,6 +11,8 @@ Tables:
   - evidence       — anchors (quotes / sources) supporting a segment or fact
   - simulations    — a comparison run (Options x Segments → Reactions)
   - simulation_cells — per-(segment, option) reaction with confidence
+  - outcome_reports — user-reported actual outcomes after shipping a decision
+  - calibration_rates — learned base rates per (option_type, sentiment)
 
 Embeddings live alongside the row that owns them (segment.embedding,
 evidence.embedding) using pgvector. We store 1536-dim vectors by default
@@ -246,3 +248,54 @@ class SimulationCell(Base):
     devil_advocate: Mapped[str | None] = mapped_column(Text)
 
     simulation: Mapped[Simulation] = relationship(back_populates="cells")
+
+
+# ─── OutcomeReport ───────────────────────────────────────────────────────────
+class OutcomeReport(Base):
+    """User-reported actual outcome after shipping a simulated decision.
+
+    One report per (simulation_id, option_letter) pair — enforced by unique
+    constraint. sample_count=0 on CalibrationRate seed rows distinguishes
+    prior (never validated) from observed data.
+    """
+
+    __tablename__ = "outcome_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    simulation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("simulations.id", ondelete="CASCADE"), nullable=False
+    )
+    option_letter: Mapped[str] = mapped_column(String(64), nullable=False)
+    reported_sentiment: Mapped[str] = mapped_column(String(16), nullable=False)
+    # positive / neutral / negative / mixed
+    reported_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    notes: Mapped[str | None] = mapped_column(String(500))
+
+    simulation: Mapped[Simulation] = relationship()
+
+
+# ─── CalibrationRate ─────────────────────────────────────────────────────────
+class CalibrationRate(Base):
+    """Learned base rate for a given (option_type, sentiment) pair.
+
+    Seeded from BASE_RATES at migration time (sample_count=0 = prior, not yet
+    validated by real data). Updated by recompute_rates() after each new
+    OutcomeReport.
+    """
+
+    __tablename__ = "calibration_rates"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    option_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    sentiment: Mapped[str] = mapped_column(String(16), nullable=False)
+    rate: Mapped[float] = mapped_column(Float(), nullable=False)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

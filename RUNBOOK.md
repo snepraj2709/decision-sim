@@ -584,3 +584,168 @@ Known schema deviation from Step 4 spec:
 Known Step 5 limitation: progress state labels (Scraping/Searching/
 Extracting) may not all be visible if the pipeline completes before
 the next poll interval. This is cosmetic — data integrity is unaffected.
+
+---
+
+# Step 6 — Calibration Loop Verification
+
+## What Step 6 ships
+
+- **Two new tables**: `outcome_reports` (user-submitted outcomes) and
+  `calibration_rates` (learned base rates per option_type × sentiment).
+- **Migration 0003_calibration_tables**: seeds 20 rows (5 types × 4 sentiments)
+  with `sample_count=0` — signals "prior, not yet observed".
+- **`app/core/calibration.py`**: `record_outcome`, `recompute_rates` (Laplace
+  blend below 5 samples, pure observed above), `get_accuracy_summary`.
+- **`score.py` updated**: reads from `calibration_rates` table instead of the
+  hardcoded dict. Falls back to hardcoded dict if the table is empty.
+- **Three new endpoints**:
+  - `POST /api/v1/simulations/{id}/outcome` — record outcome (409 on duplicate)
+  - `GET  /api/v1/simulations/{id}/outcome` — fetch outcomes for a sim
+  - `GET  /api/v1/calibration/rates` — current rates table
+- **Flight Log calibration strip** wired to real API with full modal (option
+  dropdown, 4 sentiment buttons, optional notes, accuracy result shown inline).
+- **`/calibration` page** — read-only grid of all rates. Prior / Validated labels.
+
+## ✅ Verification checklist
+
+### 1. Migration runs clean
+
+```bash
+docker compose up -d
+cd apps/api && uv run alembic upgrade head
+```
+
+Expected: migration `0003_calibration_tables` applies without error.
+
+### 2. CalibrationRate table seeded with 20 rows
+
+```bash
+docker exec -it dsim-postgres psql -U dsim -d dsim \
+  -c "SELECT option_type, sentiment, rate, sample_count FROM calibration_rates ORDER BY option_type, sentiment;"
+```
+
+Expected: 20 rows — 5 option_types × 4 sentiments. All `sample_count=0`. Rates
+match the hardcoded `BASE_RATES` values in `score.py`.
+
+### 3. Unit tests pass
+
+```bash
+cd apps/api && uv run pytest tests/test_calibration_unit.py -v
+```
+
+Expected: 5 tests pass.
+
+### 4. GET /calibration/rates returns all 5 types with 4 sentiments
+
+```bash
+curl -s http://localhost:8000/api/v1/calibration/rates | jq '.rates | keys'
+```
+
+Expected: `["bundling", "copy", "feature", "onboarding", "pricing"]`
+
+```bash
+curl -s http://localhost:8000/api/v1/calibration/rates | jq '.rates.pricing'
+```
+
+Expected: 4 keys (positive, neutral, negative, mixed), each with `rate` and
+`sample_count: 0`.
+
+### 5. Submit an outcome
+
+```bash
+# Replace {simulation_id} with a real simulation ID from Step 4/5.
+curl -s -X POST http://localhost:8000/api/v1/simulations/{simulation_id}/outcome \
+  -H 'Content-Type: application/json' \
+  -d '{"option_letter": "Price +20%", "reported_sentiment": "negative", "notes": "Pushback from power users."}' \
+  | jq .
+```
+
+Expected: HTTP 201 with the OutcomeReport including `reported_sentiment: "negative"`.
+
+### 6. CalibrationRate updated after outcome
+
+```bash
+curl -s http://localhost:8000/api/v1/calibration/rates | jq '.rates.pricing.negative'
+```
+
+Expected: `sample_count: 1`, `rate` is the blended value
+`(0.55*5 + 1.0*1)/(5+1) ≈ 0.625` (differs from seeded 0.55).
+
+### 7. Duplicate outcome returns 409
+
+```bash
+# Same simulation_id and option_letter as step 5.
+curl -s -X POST http://localhost:8000/api/v1/simulations/{simulation_id}/outcome \
+  -H 'Content-Type: application/json' \
+  -d '{"option_letter": "Price +20%", "reported_sentiment": "positive"}' \
+  -w '\n%{http_code}\n'
+```
+
+Expected: HTTP 409.
+
+### 8. Existing simulation integration tests still pass (no regression)
+
+```bash
+cd apps/api && uv run pytest tests/test_simulation_integration.py -m integration -v
+```
+
+Expected: all pass. The `get_baserate()` DB read must return the same values
+as the hardcoded table for seeded rows (sample_count=0, prior unchanged).
+
+### 9. Flight Log calibration strip wired (manual)
+
+1. Run a simulation via the Flight Log (`/compose`).
+2. When the dashboard redirects, the simulation is queued to the calibration
+   strip if the localStorage item is marked `outcome: null`.
+3. On the Flight Log (`/`), the calibration strip shows "You simulated this X
+   weeks ago — did it land?" with a "What happened?" button.
+4. Click "What happened?" — inline modal appears with option dropdown, 4 sentiment
+   buttons, notes textarea, and "Log outcome" button.
+5. Select a sentiment and submit. Accuracy result appears inline:
+   "Predicted X · Reported Y · Match ✓ / Miss ✗"
+6. If miss: "We've adjusted the model." is shown.
+7. Item moves from calibration strip to "Reported" section.
+
+### 10. /calibration page renders the rate table
+
+Visit http://localhost:3000/calibration.
+
+Expected:
+- Grid with 5 rows (pricing, feature, copy, bundling, onboarding) and 4 columns
+  (positive, neutral, negative, mixed).
+- Seeded rows show rate% and "Prior" label.
+- Rows with 5+ outcomes show "Validated" label.
+- "← Flight log" link returns to home.
+
+### 11. mypy and ruff clean
+
+```bash
+cd apps/api
+uv run mypy app/core/calibration.py app/api/v1/calibration.py
+uv run ruff check app/core/calibration.py app/api/v1/calibration.py
+```
+
+Expected: no errors.
+
+### 12. TypeScript clean
+
+```bash
+pnpm --filter web typecheck
+```
+
+Expected: no errors.
+
+## Known design decisions
+
+- The blend formula below 5 samples is Laplace-smoothing-like:
+  `rate = (prior * 5 + observed * n) / (5 + n)`. At n=1 with 1 positive
+  report for pricing, result is ≈0.25 not 1.0 — intentional to prevent
+  one report from collapsing the model.
+- `score.py` loads calibration rates once at the top of `score_cells()` using
+  its own `AsyncSessionLocal()` session (no signature change to the pipeline
+  entrypoint). Falls back to hardcoded `BASE_RATES` with a warning log if the
+  table is empty.
+- `option_letter` in `OutcomeReport` maps to the simulation's option `label`
+  field (e.g. "Price +20%"), matching how `option_letter` is stored in
+  `simulation_cells`.

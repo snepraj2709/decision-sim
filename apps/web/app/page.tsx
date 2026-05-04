@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
 // ─── LocalStorage types ───────────────────────────────────────────────────────
 
 interface RecentProduct {
@@ -25,7 +27,16 @@ interface CalibrationItem {
   decisionLabel: string;
   predictedSentiments: PredictedSentiment[];
   createdAt: string;
-  outcome: "positive" | "neutral" | "negative" | null;
+  outcome: "positive" | "neutral" | "negative" | "mixed" | null;
+}
+
+interface ReportedItem {
+  simulationId: string;
+  decisionLabel: string;
+  predicted: string | null;
+  reported: string;
+  match: boolean;
+  optionLetter: string;
 }
 
 // ─── Sentiment display ────────────────────────────────────────────────────────
@@ -36,6 +47,13 @@ const SENTIMENT_ICON: Record<string, string> = {
   negative: "✗",
   mixed: "±",
 };
+
+const SENTIMENT_LABELS: { value: "positive" | "neutral" | "negative" | "mixed"; label: string }[] = [
+  { value: "positive", label: "Positive" },
+  { value: "neutral", label: "Neutral" },
+  { value: "negative", label: "Negative" },
+  { value: "mixed", label: "Mixed" },
+];
 
 // ─── Shared primitives ───────────────────────────────────────────────────────
 
@@ -83,13 +101,75 @@ function urlHost(url: string): string {
 
 function CalibrationModal({
   item,
+  options,
   onClose,
-  onAnswer,
+  onSubmitted,
 }: {
   item: CalibrationItem;
+  options: { letter: string; title: string }[];
   onClose: () => void;
-  onAnswer: (outcome: "positive" | "neutral" | "negative") => void;
+  onSubmitted: (result: ReportedItem) => void;
 }) {
+  const [selectedOption, setSelectedOption] = useState(
+    options[0]?.letter ?? ""
+  );
+  const [selectedSentiment, setSelectedSentiment] = useState<
+    "positive" | "neutral" | "negative" | "mixed" | null
+  >(null);
+  const [notes, setNotes] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit() {
+    if (!selectedSentiment) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/v1/simulations/${item.simulationId}/outcome`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            option_letter: selectedOption,
+            reported_sentiment: selectedSentiment,
+            notes: notes.trim() || null,
+          }),
+        }
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setError(body.detail ?? "Something went wrong.");
+        return;
+      }
+
+      // Fetch accuracy summary
+      const accRes = await fetch(
+        `${API_BASE}/api/v1/simulations/${item.simulationId}/accuracy`
+      );
+      let predicted: string | null = null;
+      let match = false;
+      if (accRes.ok) {
+        const acc = await accRes.json();
+        predicted = acc.predicted ?? null;
+        match = acc.match ?? false;
+      }
+
+      onSubmitted({
+        simulationId: item.simulationId,
+        decisionLabel: item.decisionLabel,
+        predicted,
+        reported: selectedSentiment,
+        match,
+        optionLetter: selectedOption,
+      });
+    } catch {
+      setError("Network error — check your connection.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center"
@@ -111,7 +191,7 @@ function CalibrationModal({
           Calibration check
         </div>
         <h3
-          className="text-[16px] font-semibold mb-2"
+          className="text-[16px] font-semibold mb-1"
           style={{ color: "var(--ink)" }}
         >
           What actually happened?
@@ -121,37 +201,176 @@ function CalibrationModal({
           style={{ color: "var(--ink-2)" }}
         >
           You simulated <strong>{item.decisionLabel}</strong>{" "}
-          {relativeDate(item.createdAt)}. How did it land?
+          {relativeDate(item.createdAt)}. Did it land?
         </p>
-        <div className="flex gap-3">
-          {(
-            [
-              { value: "positive", label: "It worked" },
-              { value: "neutral", label: "Mixed" },
-              { value: "negative", label: "It didn't land" },
-            ] as const
-          ).map(({ value, label }) => (
-            <button
-              key={value}
-              onClick={() => onAnswer(value)}
-              className="flex-1 py-2.5 rounded text-[13px] font-medium"
+
+        {/* Option selector */}
+        {options.length > 1 && (
+          <div className="mb-4">
+            <label
+              className="font-mono text-[11px] uppercase tracking-wider block mb-1.5"
+              style={{ color: "var(--ink-3)" }}
+            >
+              Which option did you ship?
+            </label>
+            <select
+              value={selectedOption}
+              onChange={(e) => setSelectedOption(e.target.value)}
+              className="w-full rounded px-3 py-2 text-[13px]"
               style={{
                 background: "var(--bg-sunken)",
                 border: "1px solid var(--line-strong)",
                 color: "var(--ink)",
               }}
             >
-              {label}
-            </button>
-          ))}
+              {options.map((o) => (
+                <option key={o.letter} value={o.letter}>
+                  {o.letter}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {/* Sentiment buttons */}
+        <div className="mb-4">
+          <label
+            className="font-mono text-[11px] uppercase tracking-wider block mb-1.5"
+            style={{ color: "var(--ink-3)" }}
+          >
+            How did it go?
+          </label>
+          <div className="grid grid-cols-2 gap-2">
+            {SENTIMENT_LABELS.map(({ value, label }) => (
+              <button
+                key={value}
+                onClick={() => setSelectedSentiment(value)}
+                className="py-2.5 rounded text-[13px] font-medium"
+                style={{
+                  background:
+                    selectedSentiment === value
+                      ? "var(--ink)"
+                      : "var(--bg-sunken)",
+                  border: "1px solid var(--line-strong)",
+                  color:
+                    selectedSentiment === value ? "var(--bg)" : "var(--ink)",
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
+
+        {/* Notes */}
+        <div className="mb-5">
+          <label
+            className="font-mono text-[11px] uppercase tracking-wider block mb-1.5"
+            style={{ color: "var(--ink-3)" }}
+          >
+            Any notes? (optional)
+          </label>
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value.slice(0, 500))}
+            placeholder="What surprised you?"
+            rows={2}
+            className="w-full rounded px-3 py-2 text-[13px] resize-none"
+            style={{
+              background: "var(--bg-sunken)",
+              border: "1px solid var(--line-strong)",
+              color: "var(--ink)",
+            }}
+          />
+          <div
+            className="font-mono text-[10px] mt-0.5 text-right"
+            style={{ color: "var(--ink-3)" }}
+          >
+            {notes.length}/500
+          </div>
+        </div>
+
+        {error && (
+          <p
+            className="text-[12px] mb-3"
+            style={{ color: "var(--conf-low)" }}
+          >
+            {error}
+          </p>
+        )}
+
+        <button
+          onClick={handleSubmit}
+          disabled={!selectedSentiment || submitting}
+          className="w-full py-2.5 rounded text-[13px] font-semibold mb-3"
+          style={{
+            background:
+              selectedSentiment && !submitting
+                ? "var(--ink)"
+                : "var(--bg-sunken)",
+            color:
+              selectedSentiment && !submitting ? "var(--bg)" : "var(--ink-3)",
+            border: "1px solid var(--line-strong)",
+            cursor: selectedSentiment && !submitting ? "pointer" : "default",
+          }}
+        >
+          {submitting ? "Logging…" : "Log outcome"}
+        </button>
         <button
           onClick={onClose}
-          className="mt-4 w-full text-center text-[12px] font-mono"
+          className="w-full text-center text-[12px] font-mono"
           style={{ color: "var(--ink-3)" }}
         >
           Remind me later
         </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Accuracy result card ────────────────────────────────────────────────────
+
+function AccuracyCard({ item }: { item: ReportedItem }) {
+  return (
+    <div
+      className="rounded-lg p-4"
+      style={{
+        background: "var(--bg-elevated)",
+        border: "1px solid var(--line)",
+      }}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div
+            className="text-[13px] font-medium"
+            style={{ color: "var(--ink)" }}
+          >
+            {item.decisionLabel}
+          </div>
+          <div
+            className="font-mono text-[11px] mt-0.5"
+            style={{ color: "var(--ink-3)" }}
+          >
+            {item.optionLetter}
+          </div>
+        </div>
+        <div
+          className="shrink-0 font-mono text-[13px]"
+          style={{ color: item.match ? "var(--conf-high)" : "var(--conf-low)" }}
+        >
+          {item.match ? "Match ✓" : "Miss ✗"}
+        </div>
+      </div>
+      <div
+        className="mt-2 text-[12px] font-mono"
+        style={{ color: "var(--ink-2)" }}
+      >
+        Predicted {item.predicted ?? "—"} · Reported {item.reported}
+        {!item.match && (
+          <span style={{ color: "var(--ink-3)" }}>
+            {" "}· We&apos;ve adjusted the model.
+          </span>
+        )}
       </div>
     </div>
   );
@@ -163,13 +382,14 @@ export default function HomePage() {
   const router = useRouter();
   const [recent, setRecent] = useState<RecentProduct[]>([]);
   const [calibration, setCalibration] = useState<CalibrationItem[]>([]);
+  const [reported, setReported] = useState<ReportedItem[]>([]);
   const [activeCalibration, setActiveCalibration] =
     useState<CalibrationItem | null>(null);
 
   useEffect(() => {
     try {
       const r = JSON.parse(
-        localStorage.getItem("dsim_recent_products") ?? "[]",
+        localStorage.getItem("dsim_recent_products") ?? "[]"
       ) as RecentProduct[];
       setRecent(r);
     } catch {
@@ -177,7 +397,7 @@ export default function HomePage() {
     }
     try {
       const q = JSON.parse(
-        localStorage.getItem("dsim_calibration_queue") ?? "[]",
+        localStorage.getItem("dsim_calibration_queue") ?? "[]"
       ) as CalibrationItem[];
       setCalibration(q.filter((item) => item.outcome === null));
     } catch {
@@ -185,26 +405,34 @@ export default function HomePage() {
     }
   }, []);
 
-  function handleCalibrationAnswer(
-    item: CalibrationItem,
-    outcome: "positive" | "neutral" | "negative",
-  ) {
+  function handleSubmitted(result: ReportedItem) {
+    // Update queue in localStorage — mark as reported.
     try {
       const queue = JSON.parse(
-        localStorage.getItem("dsim_calibration_queue") ?? "[]",
+        localStorage.getItem("dsim_calibration_queue") ?? "[]"
       ) as CalibrationItem[];
       const updated = queue.map((q) =>
-        q.simulationId === item.simulationId ? { ...q, outcome } : q,
+        q.simulationId === result.simulationId
+          ? { ...q, outcome: result.reported as CalibrationItem["outcome"] }
+          : q
       );
       localStorage.setItem("dsim_calibration_queue", JSON.stringify(updated));
     } catch {
       /* ignore */
     }
     setCalibration((prev) =>
-      prev.filter((q) => q.simulationId !== item.simulationId),
+      prev.filter((q) => q.simulationId !== result.simulationId)
     );
+    setReported((prev) => [result, ...prev]);
     setActiveCalibration(null);
   }
+
+  // Build option list for the active modal from the calibration item.
+  const activeOptions: { letter: string; title: string }[] =
+    activeCalibration?.predictedSentiments.map((ps) => ({
+      letter: ps.optionLetter,
+      title: ps.optionTitle,
+    })) ?? [];
 
   const mostRecentSim = recent.find((r) => r.simulationId)?.simulationId;
 
@@ -398,7 +626,7 @@ export default function HomePage() {
                         className="font-mono text-[11px] mt-0.5"
                         style={{ color: "var(--ink-3)" }}
                       >
-                        Simulated {relativeDate(item.createdAt)}
+                        You simulated this {relativeDate(item.createdAt)} — did it land?
                       </div>
                     </div>
                     <button
@@ -444,16 +672,39 @@ export default function HomePage() {
             </div>
           </section>
         )}
+
+        {/* ── Section 4: Reported outcomes ────────────────────────────────── */}
+        {reported.length > 0 && (
+          <section className="mb-12">
+            <Eyebrow>Reported</Eyebrow>
+            <SectionHeading>Outcomes logged</SectionHeading>
+            <div className="flex flex-col gap-3">
+              {reported.map((item) => (
+                <AccuracyCard key={item.simulationId} item={item} />
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* Footer */}
+        <footer className="pt-8 border-t" style={{ borderColor: "var(--line)" }}>
+          <button
+            onClick={() => router.push("/calibration")}
+            className="font-mono text-[12px]"
+            style={{ color: "var(--ink-3)" }}
+          >
+            Model accuracy →
+          </button>
+        </footer>
       </div>
 
       {/* Calibration modal */}
       {activeCalibration && (
         <CalibrationModal
           item={activeCalibration}
+          options={activeOptions}
           onClose={() => setActiveCalibration(null)}
-          onAnswer={(outcome) =>
-            handleCalibrationAnswer(activeCalibration, outcome)
-          }
+          onSubmitted={handleSubmitted}
         />
       )}
     </main>
