@@ -48,13 +48,6 @@ def linear_snapshot_id() -> uuid.UUID:
     return uuid.UUID(_get_snapshot_uuids()["linear"])
 
 
-@pytest.fixture(autouse=True)
-async def dispose_db_engine_between_tests() -> None:
-    yield
-    from app.db import engine
-    await engine.dispose()
-
-
 def _mock_queue() -> MagicMock:
     mock_job = MagicMock()
     mock_job.id = "calib-job-123"
@@ -68,98 +61,54 @@ async def _create_simulation(
     snapshot_id: uuid.UUID,
     options: list[dict[str, str]],
 ) -> uuid.UUID:
-    """Create and run a simulation, return its ID."""
-    from sqlalchemy import select
-    from sqlalchemy.orm import selectinload
+    """Create and run a simulation using a fresh engine per call.
 
-    from app.db import AsyncSessionLocal
-    from app.models import Segment, Simulation
+    Matches tasks.py: each call owns its engine lifetime so pool state
+    from the FastAPI app engine never bleeds into test DB sessions.
+    """
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    from app.config import get_settings
+    from app.models import Segment
     from app.pipelines.simulation import run_simulation as run_simulation_pipeline
 
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(Segment.id).where(Segment.snapshot_id == snapshot_id).limit(1)
+    settings = get_settings()
+    engine = create_async_engine(
+        settings.database_url,
+        pool_size=1,
+        max_overflow=0,
+    )
+    try:
+        session_factory = async_sessionmaker(
+            engine, class_=AsyncSession, expire_on_commit=False
         )
-        if result.scalar_one_or_none() is None:
-            pytest.skip(f"No segments found for snapshot {snapshot_id}")
+        async with session_factory() as db:
+            result = await db.execute(
+                select(Segment.id).where(Segment.snapshot_id == snapshot_id).limit(1)
+            )
+            if result.scalar_one_or_none() is None:
+                pytest.skip(f"No segments found for snapshot {snapshot_id}")
 
-    mock_queue = _mock_queue()
-    with patch("app.api.v1.simulations._get_queue", return_value=mock_queue):
-        response = await client.post(
-            f"/api/v1/snapshots/{snapshot_id}/simulate",
-            json={"options": options},
-        )
+        mock_queue = _mock_queue()
+        with patch("app.api.v1.simulations._get_queue", return_value=mock_queue):
+            response = await client.post(
+                f"/api/v1/snapshots/{snapshot_id}/simulate",
+                json={"options": options},
+            )
 
-    if response.status_code == 422 and "No segments" in response.text:
-        pytest.skip(f"No segments for snapshot {snapshot_id}")
+        if response.status_code == 422 and "No segments" in response.text:
+            pytest.skip(f"No segments for snapshot {snapshot_id}")
 
-    assert response.status_code == 202, response.text
-    simulation_id = uuid.UUID(response.json()["simulation_id"])
+        assert response.status_code == 202, response.text
+        simulation_id = uuid.UUID(response.json()["simulation_id"])
 
-    async with AsyncSessionLocal() as db:
-        await run_simulation_pipeline(simulation_id, db)
+        async with session_factory() as db:
+            await run_simulation_pipeline(simulation_id, db)
+    finally:
+        await engine.dispose()
 
     return simulation_id
-
-
-@pytest.mark.asyncio
-async def test_outcome_report_persists_and_recomputes(
-    client: AsyncClient,
-    linear_snapshot_id: uuid.UUID,
-) -> None:
-    """Submit an outcome → OutcomeReport row exists, CalibrationRate updated."""
-    from sqlalchemy import select
-
-    from app.db import AsyncSessionLocal
-    from app.models import CalibrationRate, OutcomeReport
-
-    has_llm_key = False
-    try:
-        from app.config import get_settings
-        s = get_settings()
-        has_llm_key = bool(s.anthropic_api_key or s.openai_api_key)
-    except Exception:
-        pass
-
-    if not has_llm_key:
-        pytest.skip("No LLM API key configured")
-
-    simulation_id = await _create_simulation(client, linear_snapshot_id, LINEAR_OPTIONS)
-
-    response = await client.post(
-        f"/api/v1/simulations/{simulation_id}/outcome",
-        json={
-            "option_letter": "Price +20%",
-            "reported_sentiment": "negative",
-            "notes": "Customers pushed back hard on pricing.",
-        },
-    )
-    assert response.status_code == 201, response.text
-    data = response.json()
-    assert data["reported_sentiment"] == "negative"
-    assert data["simulation_id"] == str(simulation_id)
-
-    async with AsyncSessionLocal() as db:
-        report = (
-            await db.execute(
-                select(OutcomeReport).where(
-                    OutcomeReport.simulation_id == simulation_id
-                )
-            )
-        ).scalar_one_or_none()
-        assert report is not None
-        assert report.reported_sentiment == "negative"
-
-        rate = (
-            await db.execute(
-                select(CalibrationRate).where(
-                    CalibrationRate.option_type == "pricing",
-                    CalibrationRate.sentiment == "negative",
-                )
-            )
-        ).scalar_one_or_none()
-        assert rate is not None
-        assert rate.sample_count >= 1
 
 
 @pytest.mark.asyncio
@@ -191,6 +140,73 @@ async def test_rates_endpoint_returns_all_option_types(client: AsyncClient) -> N
                 assert abs(cell["rate"] - expected_rate) < 1e-6, (
                     f"{option_type}/{sentiment}: expected {expected_rate}, got {cell['rate']}"
                 )
+
+
+@pytest.mark.asyncio
+async def test_outcome_report_persists_and_recomputes(
+    client: AsyncClient,
+    linear_snapshot_id: uuid.UUID,
+) -> None:
+    """Submit an outcome → OutcomeReport row exists, CalibrationRate updated."""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    from app.config import get_settings
+    from app.models import CalibrationRate, OutcomeReport
+
+    has_llm_key = False
+    try:
+        s = get_settings()
+        has_llm_key = bool(s.anthropic_api_key or s.openai_api_key)
+    except Exception:
+        pass
+
+    if not has_llm_key:
+        pytest.skip("No LLM API key configured")
+
+    simulation_id = await _create_simulation(client, linear_snapshot_id, LINEAR_OPTIONS)
+
+    response = await client.post(
+        f"/api/v1/simulations/{simulation_id}/outcome",
+        json={
+            "option_letter": "Price +20%",
+            "reported_sentiment": "negative",
+            "notes": "Customers pushed back hard on pricing.",
+        },
+    )
+    assert response.status_code == 201, response.text
+    data = response.json()
+    assert data["reported_sentiment"] == "negative"
+    assert data["simulation_id"] == str(simulation_id)
+
+    settings = get_settings()
+    engine = create_async_engine(settings.database_url, pool_size=1, max_overflow=0)
+    try:
+        async with async_sessionmaker(
+            engine, class_=AsyncSession, expire_on_commit=False
+        )() as db:
+            report = (
+                await db.execute(
+                    select(OutcomeReport).where(
+                        OutcomeReport.simulation_id == simulation_id
+                    )
+                )
+            ).scalar_one_or_none()
+            assert report is not None
+            assert report.reported_sentiment == "negative"
+
+            rate = (
+                await db.execute(
+                    select(CalibrationRate).where(
+                        CalibrationRate.option_type == "pricing",
+                        CalibrationRate.sentiment == "negative",
+                    )
+                )
+            ).scalar_one_or_none()
+            assert rate is not None
+            assert rate.sample_count >= 1
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

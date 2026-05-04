@@ -1,24 +1,39 @@
-"""Shared pytest fixtures.
+"""Shared pytest fixtures and configuration."""
+from __future__ import annotations
 
-Tests in Step 1 are deliberately limited:
-  - confidence math (pure, no I/O)
-  - health endpoint (proves the app boots + CORS + schema)
-  - 501 contract on snapshot endpoint (proves the contract is wired)
-
-Steps 2-4 add real pipeline tests against a test database.
-"""
-
-from collections.abc import AsyncIterator
-
+import asyncio
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient, ASGITransport
 
-from app.main import app
+
+@pytest.fixture(scope="function", autouse=True)
+def fresh_event_loop():
+    """Give each test function its own clean event loop."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    yield loop
+    loop.close()
+    asyncio.set_event_loop(None)
 
 
 @pytest.fixture
-async def client() -> AsyncIterator[AsyncClient]:
-    """Async HTTP client bound directly to the FastAPI app — no network."""
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+async def client():
+    """HTTP test client wired to the FastAPI app."""
+    from app.main import app
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as c:
         yield c
+
+@pytest.fixture(autouse=True)
+async def reset_app_db_engine():
+    """Dispose and recreate the app DB engine between tests.
+    
+    Without this, asyncpg connections created in one test's event loop
+    are reused in the next test's loop, causing 'Future attached to a
+    different loop' errors.
+    """
+    yield
+    from app.db import engine
+    await engine.dispose()
