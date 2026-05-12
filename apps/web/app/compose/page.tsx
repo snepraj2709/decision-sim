@@ -148,6 +148,47 @@ function StepIndicator({
 
 // ─── Step A — URL input ───────────────────────────────────────────────────────
 
+const PRODUCT_URL_MAX_LENGTH = 1024;
+const URL_SCHEME_RE = /^[a-z][a-z\d+\-.]*:\/\//i;
+
+function normalizeProductUrlInput(input: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed || trimmed.length > PRODUCT_URL_MAX_LENGTH || /\s/.test(trimmed)) {
+    return null;
+  }
+
+  const candidate = URL_SCHEME_RE.test(trimmed)
+    ? trimmed
+    : `https://${trimmed}`;
+
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+    if (parsed.username || parsed.password) {
+      return null;
+    }
+
+    const hostname = parsed.hostname.toLowerCase();
+    if (
+      !hostname ||
+      !hostname.includes(".") ||
+      hostname.startsWith(".") ||
+      hostname.endsWith(".")
+    ) {
+      return null;
+    }
+
+    const host = parsed.host.toLowerCase();
+    const path =
+      parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "");
+    return `https://${host}${path}`;
+  } catch {
+    return null;
+  }
+}
+
 function StepURL({
   onComplete,
 }: {
@@ -160,13 +201,18 @@ function StepURL({
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    const trimmed = url.trim();
-    if (!trimmed) return;
+    const normalizedUrl = normalizeProductUrlInput(url);
+    if (!normalizedUrl) {
+      setPhase("error");
+      setError("Enter a valid product domain or URL.");
+      return;
+    }
+
     setPhase("working");
     setMessage("Scraping...");
     setError("");
     try {
-      const job = await api.createSnapshot(trimmed);
+      const job = await api.createSnapshot(normalizedUrl);
       const status = await api.pollSnapshotJob(job.job_id, (s) => {
         setMessage(SNAPSHOT_MSG[s.status] ?? "Working...");
       });
@@ -174,7 +220,7 @@ function StepURL({
         throw new Error(status.error ?? "Snapshot failed");
       }
       const snap = await api.getSnapshot(status.snapshot_id!);
-      onComplete(snap, trimmed);
+      onComplete(snap, normalizedUrl);
     } catch (err) {
       setPhase("error");
       setError(err instanceof Error ? err.message : "Something went wrong");
@@ -188,11 +234,23 @@ function StepURL({
       <SectionHeading>Paste a product URL</SectionHeading>
       <form onSubmit={handleSubmit} className="flex flex-col gap-4">
         <input
-          type="url"
+          type="text"
+          inputMode="url"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
           value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          placeholder="https://linear.app"
+          onChange={(e) => {
+            setUrl(e.target.value);
+            if (phase === "error") {
+              setPhase("idle");
+              setError("");
+            }
+          }}
+          placeholder="linear.app"
           disabled={phase === "working"}
+          maxLength={PRODUCT_URL_MAX_LENGTH}
+          aria-invalid={phase === "error"}
           className="w-full px-4 py-3 rounded text-[15px] font-mono"
           style={{
             background: "var(--bg-elevated)",
