@@ -16,19 +16,15 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Generic, TypeVar
+from dataclasses import dataclass
 
 from app.agents.rubrics.base import RubricResult
 
 logger = logging.getLogger(__name__)
 
-InputT = TypeVar("InputT")
-OutputT = TypeVar("OutputT")
-
 
 @dataclass
-class AgentOutput(Generic[OutputT]):
+class AgentOutput[OutputT]:
     result: OutputT
     rubric_passed: bool
     rubric_result: RubricResult
@@ -40,7 +36,7 @@ class AgentOutput(Generic[OutputT]):
         """True if Orchestrator should receive a warning about this output."""
         return not self.rubric_passed or bool(self.rubric_result.soft_flags)
 
-    def failure_metadata(self) -> dict:
+    def failure_metadata(self) -> dict[str, object]:
         """Serialisable metadata for Orchestrator synthesis prompt."""
         return {
             "agent": self.agent_name,
@@ -50,7 +46,7 @@ class AgentOutput(Generic[OutputT]):
         }
 
 
-class Agent(ABC, Generic[InputT, OutputT]):
+class Agent[InputT, OutputT](ABC):
     """
     Abstract base for all Decision Sim agents.
 

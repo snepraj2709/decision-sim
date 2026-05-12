@@ -8,7 +8,8 @@ Always run these first. Only call Haiku if function-based checks are insufficien
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from urllib.parse import urlparse
 
 from app.agents.rubrics.base import RubricDimension
@@ -16,7 +17,7 @@ from app.pipelines.icp._filters import is_customer_evidence  # reuse existing fi
 
 
 def check_source_diversity(
-    search_results: list, threshold: float = 0.40
+    search_results: list[Any], threshold: float = 0.40
 ) -> RubricDimension:
     """
     Unique root domains / total results must exceed threshold.
@@ -51,7 +52,7 @@ def check_source_diversity(
 
 
 def check_recency(
-    search_results: list, threshold: float = 0.50, months: int = 18
+    search_results: list[Any], threshold: float = 0.50, months: int = 18
 ) -> RubricDimension:
     """
     Fraction of results published within the last N months must exceed threshold.
@@ -64,7 +65,7 @@ def check_recency(
             is_hard_gate=False,
             reason="No search results to evaluate recency",
         )
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=months * 30)
+    cutoff = datetime.now(tz=UTC) - timedelta(days=months * 30)
     recent = [
         r
         for r in search_results
@@ -121,7 +122,7 @@ def check_customer_voice_ratio(
 
 
 def check_anchor_density(
-    segments: list, min_anchors: int = 2
+    segments: list[Any], min_anchors: int = 2
 ) -> RubricDimension:
     """
     Every segment must have at least min_anchors unique evidence quotes.
@@ -148,7 +149,7 @@ def check_anchor_density(
 
 
 def check_segment_distinctness(
-    segment_embeddings: list, max_similarity: float = 0.92
+    segment_embeddings: list[list[float]], max_similarity: float = 0.92
 ) -> RubricDimension:
     """
     Checks that no two segments are too similar (would be merged by dedup logic).
@@ -199,7 +200,7 @@ def check_calibration_alignment(
     sigma_multiplier: float = 2.0,
 ) -> RubricDimension:
     """
-    Check if the predicted churn range overlaps with [base_rate ± 2σ].
+    Check if the predicted churn range overlaps with [base_rate +/- 2 sigma].
     If calibration_n < 5, treat as soft gate (data too sparse to be authoritative).
     sigma here is approximated as sqrt(rate * (1-rate) / max(n, 1)).
     """

@@ -52,7 +52,7 @@ class RubricResult:
         """Soft-gate failures to pass to Orchestrator as warning flags."""
         return [d for d in self.dimensions if not d.is_hard_gate and not d.passed]
 
-    def as_metadata(self) -> dict:
+    def as_metadata(self) -> dict[str, object]:
         """Serialise for inclusion in Orchestrator synthesis prompt."""
         return {
             "passed": self.passed,
