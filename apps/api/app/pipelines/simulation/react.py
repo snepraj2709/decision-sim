@@ -201,3 +201,24 @@ async def generate_reactions(
         for option in options
     ]
     return list(await asyncio.gather(*tasks))
+
+
+async def generate_reaction(
+    segment: Segment,
+    option_letter: str,
+    option_text: str,
+    option_type: str = "feature",
+    extra_instructions: str | None = None,
+) -> ReactionResult:
+    """Agent-layer wrapper for a single (segment, option) reaction.
+
+    extra_instructions are appended to option_text so the DSPy prompt
+    receives the scaffold without modifying _call_dspy.
+    """
+    desc = option_text if not extra_instructions else f"{option_text}\n\n{extra_instructions}"
+    option = ParsedOption(
+        label=option_letter,
+        description=desc,
+        option_type=option_type,  # type: ignore[arg-type]
+    )
+    return await _react_one(segment, option)

@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass
 
 import structlog
+import dspy  # type: ignore[import-untyped]
 
 from app.core.confidence import (
     TriangulationInput,
@@ -23,6 +24,33 @@ from app.pipelines.simulation.parse import ParsedOption
 from app.pipelines.simulation.react import ReactionResult
 
 log = structlog.get_logger()
+
+
+class _DevilsAdvocate(dspy.Signature):  # type: ignore[misc]
+    """Generate a devil's advocate challenge for a low-confidence simulation cell."""
+
+    segment_name: str = dspy.InputField()
+    reaction_summary: str = dspy.InputField(
+        desc="A brief description of the simulated reaction"
+    )
+    option_description: str = dspy.InputField()
+
+    devil_advocate: str = dspy.OutputField(
+        desc="What would change my mind about this reaction? Be specific."
+    )
+    smallest_experiment: str = dspy.OutputField(
+        desc=(
+            "The smallest invalidating test a PM could run in 2 weeks or less. "
+            "e.g., 'Run a 50-user price survey'"
+        )
+    )
+
+
+@dataclass
+class DevilsAdvocateOutput:
+    counter_case: str
+    invalidating_experiment: str
+
 
 # Hardcoded fallback — used when the CalibrationRate table has no row for a
 # given (option_type, sentiment). Should only occur if the DB was wiped or the
@@ -139,8 +167,6 @@ def _call_devils_advocate(
     reaction_summary: str,
     option_description: str,
 ) -> tuple[str, str]:
-    import dspy  # type: ignore[import-untyped]
-
     from app.config import get_settings
 
     settings = get_settings()
@@ -159,27 +185,8 @@ def _call_devils_advocate(
     else:
         raise RuntimeError("No LLM API key configured")
 
-    class DevilsAdvocate(dspy.Signature):  # type: ignore[misc]
-        """Generate a devil's advocate challenge for a low-confidence simulation cell."""
-
-        segment_name: str = dspy.InputField()
-        reaction_summary: str = dspy.InputField(
-            desc="A brief description of the simulated reaction"
-        )
-        option_description: str = dspy.InputField()
-
-        devil_advocate: str = dspy.OutputField(
-            desc="What would change my mind about this reaction? Be specific."
-        )
-        smallest_experiment: str = dspy.OutputField(
-            desc=(
-                "The smallest invalidating test a PM could run in 2 weeks or less. "
-                "e.g., 'Run a 50-user price survey'"
-            )
-        )
-
     with dspy.context(lm=lm):
-        predictor = dspy.Predict(DevilsAdvocate)
+        predictor = dspy.Predict(_DevilsAdvocate)
         result = predictor(
             segment_name=segment_name,
             reaction_summary=reaction_summary,
@@ -189,6 +196,36 @@ def _call_devils_advocate(
     devil = str(result.devil_advocate or "").strip()
     experiment = str(result.smallest_experiment or "").strip()
     return devil, experiment
+
+
+def generate_devil_advocate(
+    segment: Segment,
+    cell: ReactionResult,
+    option_text: str,
+    extra_instructions: str | None = None,
+) -> DevilsAdvocateOutput:
+    """Synchronous D.A. call for the agent layer.
+
+    Caller is responsible for setting dspy.context(lm=...) before calling this.
+    Does NOT create its own LM — uses whatever is in the current dspy context.
+    """
+    summary = (
+        f"{segment.name} reacted {cell.reaction_sentiment} "
+        f"(churn: {cell.churn_probability:.0%}). "
+        f"Top concern: {cell.top_concern}"
+    )
+    if extra_instructions:
+        summary += f"\n\n{extra_instructions}"
+    predictor = dspy.Predict(_DevilsAdvocate)
+    result = predictor(
+        segment_name=segment.name or "",
+        reaction_summary=summary,
+        option_description=option_text,
+    )
+    return DevilsAdvocateOutput(
+        counter_case=str(result.devil_advocate or "").strip(),
+        invalidating_experiment=str(result.smallest_experiment or "").strip(),
+    )
 
 
 async def _generate_devils_advocate(
