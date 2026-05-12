@@ -235,6 +235,7 @@ def _hash_based_embeddings(snippets: list[str]) -> list[list[float]]:
 
 def _cluster_with_hdbscan(
     embeddings: np.ndarray,
+    min_cluster_size: int = 2,
 ) -> tuple[list[int], int]:
     """Cluster embeddings using HDBSCAN.
 
@@ -249,7 +250,7 @@ def _cluster_with_hdbscan(
     normalized = embeddings / norms
 
     clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=2,
+        min_cluster_size=min_cluster_size,
         min_samples=1,
         metric="euclidean",  # On normalized vectors, equivalent to cosine
         cluster_selection_method="eom",
@@ -433,3 +434,131 @@ async def cluster_snippets(snapshot: ProductSnapshot) -> ClusterResult:
         all_sources=sources,
         all_embeddings=embeddings,
     )
+
+
+def _extract_snippets_from_results(
+    search_results: list,
+) -> tuple[list[str], list[SnippetSource]]:
+    """Extract snippets from a list of SearchResult objects (agent entry point).
+
+    Parallel to _extract_snippets but takes SearchResult objects directly
+    instead of reading from a ProductSnapshot's JSON column.
+    """
+    snippets: list[str] = []
+    sources: list[SnippetSource] = []
+
+    for result in search_results:
+        raw_snippet = getattr(result, "snippet", "") or ""
+        if not raw_snippet:
+            continue
+
+        source = SnippetSource(
+            url=getattr(result, "url", ""),
+            title=getattr(result, "title", ""),
+            source_kind=getattr(result, "source_kind", "other"),
+            published_date=getattr(result, "published_date", None),
+        )
+
+        snippet = clean_snippet(raw_snippet, enforce_minimum_length=True)
+        if not snippet:
+            continue
+
+        is_customer, reason = is_customer_evidence(snippet, source.source_kind)
+        if not is_customer:
+            log.debug(
+                "icp.cluster.filtered_non_customer",
+                reason=reason,
+                snippet=snippet[:50],
+            )
+            continue
+
+        snippets.append(snippet)
+        sources.append(source)
+
+    return snippets, sources
+
+
+async def run_cluster(
+    search_results: list,
+    min_cluster_size: int = 2,
+) -> tuple[ClusterResult, list[list[float]]]:
+    """Agent entry point for the cluster stage.
+
+    Takes SearchResult objects directly (not a ProductSnapshot).
+    Returns (ClusterResult, all_embeddings) so the agent can pass
+    embeddings to the rubric's check_segment_distinctness.
+
+    Args:
+        search_results: List of SearchResult objects from the search stage.
+        min_cluster_size: Minimum cluster size for HDBSCAN. Use 1 on retry
+            for finer-grained clustering when default produces too few clusters.
+    """
+    snippets, sources = _extract_snippets_from_results(search_results)
+
+    if not snippets:
+        log.info("icp.run_cluster.empty")
+        empty = ClusterResult(
+            clusters=[],
+            noise_indices=[],
+            total_snippets=0,
+            all_snippets=[],
+            all_sources=[],
+            all_embeddings=[],
+        )
+        return empty, []
+
+    if len(snippets) < MIN_SNIPPETS_FOR_CLUSTERING:
+        log.info("icp.run_cluster.cold_start", n_snippets=len(snippets))
+        embeddings = await _embed_snippets(snippets)
+        clusters: list[Cluster] = []
+        for i, (snippet, source, embedding) in enumerate(
+            zip(snippets, sources, embeddings, strict=True)
+        ):
+            clusters.append(
+                Cluster(
+                    centroid_embedding=embedding,
+                    member_indices=[i],
+                    member_snippets=[snippet],
+                    member_sources=[source],
+                )
+            )
+        result = ClusterResult(
+            clusters=clusters,
+            noise_indices=[],
+            total_snippets=len(snippets),
+            all_snippets=snippets,
+            all_sources=sources,
+            all_embeddings=embeddings,
+        )
+        return result, embeddings
+
+    embeddings = await _embed_snippets(snippets)
+    embeddings_array = np.array(embeddings)
+
+    labels, n_clusters = _cluster_with_hdbscan(
+        embeddings_array, min_cluster_size=min_cluster_size
+    )
+
+    if n_clusters < 3:
+        log.info("icp.run_cluster.hdbscan_fallback", hdbscan_clusters=n_clusters)
+        labels = _cluster_with_agglomerative(embeddings_array, n_clusters=4)
+
+    clusters, noise_indices = _build_clusters(labels, snippets, sources, embeddings)
+    clusters.sort(key=lambda c: len(c.member_indices), reverse=True)
+
+    result = ClusterResult(
+        clusters=clusters,
+        noise_indices=noise_indices,
+        total_snippets=len(snippets),
+        all_snippets=snippets,
+        all_sources=sources,
+        all_embeddings=embeddings,
+    )
+
+    log.info(
+        "icp.run_cluster.done",
+        n_clusters=len(clusters),
+        n_noise=len(noise_indices),
+    )
+
+    return result, embeddings

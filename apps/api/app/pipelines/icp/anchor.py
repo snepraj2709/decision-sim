@@ -399,3 +399,7 @@ async def anchor_segments(
     )
 
     return unique_anchored
+
+
+# Agent entry point — same signature as anchor_segments.
+run_anchor = anchor_segments

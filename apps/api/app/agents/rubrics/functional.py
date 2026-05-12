@@ -121,17 +121,26 @@ def check_customer_voice_ratio(
     )
 
 
+def _evidence_list(s: Any) -> list[Any]:
+    """Return the evidence collection from either an ORM Segment or AnchoredSegment."""
+    ev = getattr(s, "evidence", None)
+    if ev is not None:
+        return list(ev)
+    return list(getattr(s, "evidence_quotes", None) or [])
+
+
 def check_anchor_density(
     segments: list[Any], min_anchors: int = 2
 ) -> RubricDimension:
     """
     Every segment must have at least min_anchors unique evidence quotes.
     This is already enforced by the ICP anchor stage, but we recheck here.
+    Works with both ORM Segment (evidence) and AnchoredSegment (evidence_quotes).
     """
     thin_segments = [
         s.name
         for s in segments
-        if hasattr(s, "evidence") and len(s.evidence) < min_anchors
+        if len(_evidence_list(s)) < min_anchors
     ]
     passed = len(thin_segments) == 0
     score = 1.0 if passed else (len(segments) - len(thin_segments)) / len(segments)

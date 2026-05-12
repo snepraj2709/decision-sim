@@ -307,6 +307,74 @@ async def _synthesize_with_dspy(
     )
 
 
+async def run_synthesize(
+    cluster_result: ClusterResult,
+    jtbd_constraint: str | None = None,
+    naming_constraint: str | None = None,
+) -> list[SynthesizedSegment]:
+    """Agent entry point for the synthesize stage.
+
+    Takes ClusterResult directly (no ProductSnapshot required).
+    Optional constraints are appended to every synthesis prompt.
+
+    Args:
+        cluster_result: Output of run_cluster.
+        jtbd_constraint: Hard requirement injected when JTBD rubric fails on retry.
+        naming_constraint: Hard requirement injected when naming rubric fails on retry.
+    """
+    if not cluster_result.clusters:
+        log.info("icp.run_synthesize.no_clusters")
+        return []
+
+    prompt_parts = [p for p in [jtbd_constraint, naming_constraint] if p]
+    prompt_addition = " ".join(prompt_parts)
+
+    segments: list[SynthesizedSegment] = []
+
+    for i, cluster in enumerate(cluster_result.clusters):
+        if len(segments) >= TARGET_MAX_SEGMENTS:
+            break
+
+        synthesis_cluster = _cluster_for_synthesis(cluster, cluster_result, i)
+        if synthesis_cluster is None:
+            continue
+
+        try:
+            segment = await _synthesize_with_dspy(
+                synthesis_cluster, i, product_context="", prompt_addition=prompt_addition
+            )
+            if is_invalid_segment_name(segment.name):
+                log.warning(
+                    "icp.run_synthesize.invalid_name_retry",
+                    cluster_index=i,
+                    segment_name=segment.name,
+                )
+                segment = await _synthesize_with_dspy(
+                    synthesis_cluster,
+                    i,
+                    product_context="",
+                    prompt_addition=(
+                        (prompt_addition + " " if prompt_addition else "")
+                        + SPECIFIC_NAME_RETRY_INSTRUCTION
+                    ),
+                )
+
+            if is_invalid_segment_name(segment.name):
+                log.warning(
+                    "icp.run_synthesize.skip_invalid_name",
+                    cluster_index=i,
+                    segment_name=segment.name,
+                )
+                continue
+
+            segments.append(segment)
+        except Exception as e:
+            log.error("icp.run_synthesize.cluster_failed", cluster_index=i, error=str(e))
+
+    log.info("icp.run_synthesize.done", n_segments=len(segments))
+    return segments
+
+
 async def synthesize_segments(
     snapshot: ProductSnapshot,
     cluster_result: ClusterResult,

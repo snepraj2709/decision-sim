@@ -21,6 +21,8 @@ from urllib.parse import urlparse
 
 import structlog
 
+import math
+
 from app.config import get_settings
 from app.pipelines.snapshot.scrape import ScrapeResult
 
@@ -79,9 +81,8 @@ def classify_source_kind(url: str) -> SourceKind:
     return "other"
 
 
-def _build_queries(scrape_result: ScrapeResult) -> list[str]:
-    """Build 3 search queries from scraped product info."""
-    # Extract domain
+def _build_queries(scrape_result: ScrapeResult, n_queries: int = 3) -> list[str]:
+    """Build search queries from scraped product info. Returns up to n_queries queries."""
     parsed = urlparse(scrape_result.url_canonical)
     domain = parsed.netloc.replace("www.", "")
 
@@ -89,9 +90,11 @@ def _build_queries(scrape_result: ScrapeResult) -> list[str]:
         f'"{domain}" reviews',
         f'"{domain}" pricing site:reddit.com OR site:news.ycombinator.com',
         f'"{domain}" alternatives competitors',
+        f'"{domain}" user experience OR customer feedback',
+        f'"{domain}" problems OR issues OR complaints',
     ]
 
-    return queries
+    return queries[:n_queries]
 
 
 async def _search_tavily(query: str) -> list[SearchResult]:
@@ -195,11 +198,15 @@ async def _search_with_retry(
     return []
 
 
-async def run_search(scrape_result: ScrapeResult) -> list[SearchResult]:
+async def run_search(
+    scrape_result: ScrapeResult,
+    max_results: int | None = None,
+) -> list[SearchResult]:
     """Run the search stage for a scraped product.
 
     Args:
         scrape_result: Result from the scrape stage.
+        max_results: Optional cap on total results. When > 15, uses more queries.
 
     Returns:
         List of SearchResult objects from external sources.
@@ -220,8 +227,12 @@ async def run_search(scrape_result: ScrapeResult) -> list[SearchResult]:
     provider_name = "tavily" if use_tavily else "exa"
     log.info("search.using_provider", provider=provider_name)
 
-    # Build queries
-    queries = _build_queries(scrape_result)
+    # Build queries — more queries when a higher result cap is requested
+    n_queries = 3
+    if max_results is not None and max_results > RESULTS_PER_QUERY * 3:
+        n_queries = min(5, math.ceil(max_results / RESULTS_PER_QUERY))
+
+    queries = _build_queries(scrape_result, n_queries=n_queries)
     log.info("search.queries", queries=queries)
 
     # Execute searches in parallel
