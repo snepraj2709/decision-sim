@@ -749,3 +749,117 @@ Expected: no errors.
 - `option_letter` in `OutcomeReport` maps to the simulation's option `label`
   field (e.g. "Price +20%"), matching how `option_letter` is stored in
   `simulation_cells`.
+
+---
+
+# V2 Agent Architecture
+
+This section documents the multi-agent simulation pipeline introduced in the
+agent refactor (Sub-prompts 1–5). V1 (`task_run_simulation`) is unchanged and
+remains the default. V2 is opt-in via `AGENT_MODE=v2`.
+
+## New environment variables
+
+| Variable | Values | Default | Description |
+|---|---|---|---|
+| `AGENT_MODE` | `v1`, `v2` | `v1` | `v1` = original pipeline, `v2` = multi-agent |
+| `DEVIL_ADVOCATE_MODE` | `all`, `selective`, `off` | `selective` | D.A. coverage strategy |
+| `SONNET_MODEL` | model string | `claude-sonnet-4-20250514` | Primary generation model (reactions, orchestrator) |
+| `HAIKU_MODEL` | model string | `claude-haiku-4-5-20251001` | Rubric eval + standard D.A. cells |
+
+## Running in V2 mode
+
+Update your `.env`:
+
+```
+AGENT_MODE=v2
+DEVIL_ADVOCATE_MODE=selective
+```
+
+Restart the RQ worker (worker reads env at startup):
+
+```bash
+cd apps/api
+uv run rq worker --worker-class rq.SimpleWorker --url redis://localhost:6379
+```
+
+Verify V2 is active by watching worker logs — you should see per-agent attempt lines:
+
+```
+agent=calibration_agent attempt=1/2
+agent=reaction_analyst attempt=1/2
+agent=reaction_analyst attempt=1/2
+...
+agent=devils_advocate attempt=1/2
+agent=orchestrator attempt=1/1
+```
+
+Each cell produces its own `reaction_analyst` and (conditionally) `devils_advocate` log line. The final `orchestrator` line appears once per simulation.
+
+## Schema migration required
+
+Before running V2 in an existing database, apply migration 0004:
+
+```bash
+cd apps/api
+uv run alembic upgrade head
+```
+
+This adds the `orchestrator_memo` JSON column to the `simulations` table. Without it, the Orchestrator output is discarded with a warning log and the simulation still completes normally.
+
+## Cost expectations (V2 vs V1)
+
+Estimates based on 5 segments × 3 options. Actual cost varies by evidence
+density and number of rubric retries.
+
+| Mode | Approx. cost/simulation | Notes |
+|---|---|---|
+| V1 (original) | ~$0.31 | Baseline |
+| V2 + selective D.A. | ~$0.36 | +16% — justified by rubric quality gates |
+| V2 + all D.A. | ~$0.39 | +26% — maximum coverage |
+| V2 + D.A. off | ~$0.33 | +7% — rubric overhead only |
+
+## Agent rubric failure behaviour
+
+If an agent exhausts retries, its output is passed to the Orchestrator with
+`rubric_passed=False`. The Orchestrator names the failure in `confidence_rationale`
+and reduces stated confidence for affected cells. The simulation always completes —
+rubric failure is never fatal.
+
+The `orchestrator_memo` JSON in the `simulations` table records:
+
+| Field | Description |
+|---|---|
+| `recommendation` | ONE named option with segment-grounded justification |
+| `confidence_rationale` | Why the recommendation is trusted or hedged |
+| `strongest_counter_case` | Most falsifiable D.A. challenge to the recommendation |
+| `conflict_resolution` | How tensions between reaction and D.A. outputs were resolved |
+| `rubric_failures_count` | Total cells with `rubric_passed=False` across all agents |
+| `stale_calibration_types` | Option types with fewer than 5 observed outcomes |
+
+## Integration test
+
+```bash
+cd apps/api
+uv run pytest tests/test_orchestrator_integration.py -m integration -v
+```
+
+Prerequisites: live DB with `alembic upgrade head` applied, segments seeded for
+snapshot `5d0b9dd9-ed12-4a71-8078-5847ae830761` (Linear), and at least one LLM
+API key (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`).
+
+## Agent files
+
+| File | Purpose |
+|---|---|
+| `app/agents/base.py` | `Agent` ABC + `AgentOutput` dataclass + retry loop |
+| `app/agents/config.py` | Model routing, `AGENT_MODE`, `DEVIL_ADVOCATE_MODE` flags |
+| `app/agents/calibration_agent.py` | Drift detection — flags thin-data option types (no LLM) |
+| `app/agents/evidence_curator.py` | Wraps evidence search with source diversity rubric |
+| `app/agents/segment_architect.py` | Wraps ICP synthesis with JTBD/naming/distinctness rubrics |
+| `app/agents/reaction_analyst.py` | Per-cell reaction with coherence + specificity rubrics |
+| `app/agents/devil_advocate.py` | Counter-case generation; stakes-based Haiku/Sonnet routing |
+| `app/agents/orchestrator.py` | Final synthesis → Decision Memo (Sonnet, max 1 retry) |
+| `app/agents/rubrics/base.py` | `RubricResult`, `RubricDimension` dataclasses |
+| `app/agents/rubrics/functional.py` | Pure-Python rubric checks (no LLM) |
+| `app/agents/rubrics/signatures.py` | DSPy rubric signatures for LLM-as-judge calls |

@@ -16,8 +16,15 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from typing import TYPE_CHECKING, Any
 
 import structlog
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.config import Settings
+    from app.models import Simulation
 
 log = structlog.get_logger()
 
@@ -184,7 +191,7 @@ async def _run_simulation_orchestrated(simulation_id: str) -> None:
         await engine.dispose()
 
 
-async def _orchestrated_pipeline(simulation_id: str, db: object, settings: object) -> None:
+async def _orchestrated_pipeline(simulation_id: str, db: AsyncSession, settings: Settings) -> None:
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
 
@@ -198,13 +205,12 @@ async def _orchestrated_pipeline(simulation_id: str, db: object, settings: objec
     from app.agents.reaction_analyst import run_all_reactions
     from app.models import ProductSnapshot, Segment, Simulation
 
-    simulation = await db.get(Simulation, uuid.UUID(simulation_id))  # type: ignore[union-attr]
+    simulation = await db.get(Simulation, uuid.UUID(simulation_id))
     if simulation is None:
         raise ValueError(f"Simulation {simulation_id} not found")
 
     simulation.status = "running"
-    await db.commit()  # type: ignore[union-attr]
-
+    await db.commit()
     try:
         seg_stmt = (
             select(Segment)
@@ -212,29 +218,26 @@ async def _orchestrated_pipeline(simulation_id: str, db: object, settings: objec
             .options(selectinload(Segment.evidence))
             .order_by(Segment.share_pct.desc())
         )
-        segments = list((await db.execute(seg_stmt)).scalars().all())  # type: ignore[union-attr]
-
-        snapshot = await db.get(ProductSnapshot, simulation.snapshot_id)  # type: ignore[union-attr]
-
+        segments = list((await db.execute(seg_stmt)).scalars().all())
+        snapshot = await db.get(ProductSnapshot, simulation.snapshot_id)
         options = list(simulation.options or [])
-        option_types = list({opt.get("option_type", "feature") for opt in options})
+        option_types = list({str(opt.get("option_type", "feature")) for opt in options})
 
         # 1. Calibration (pure Python, no LLM calls)
         cal_agent = CalibrationAgent()
         cal_agent_out = await cal_agent.execute(CalibrationInput(
             option_types=option_types,
-            db=db,  # type: ignore[arg-type]
-        ))
+            db=db,        ))
         calibration_output = cal_agent_out.result
         if calibration_output is None:
             calibration_output = CalibrationOutput(rates={}, stale_flags=[], low_n_types=[])
 
         # 2. Reactions — all (segment × option) pairs in parallel
-        options_for_reactions = [
+        options_for_reactions: list[dict[str, str]] = [
             {
-                "letter": opt["label"],
-                "text": opt.get("description", ""),
-                "option_type": opt.get("option_type", "feature"),
+                "letter": str(opt["label"]),
+                "text": str(opt.get("description", "")),
+                "option_type": str(opt.get("option_type", "feature")),
             }
             for opt in options
         ]
@@ -246,7 +249,7 @@ async def _orchestrated_pipeline(simulation_id: str, db: object, settings: objec
 
         # 3. Devil's Advocate — cells approved by DEVIL_ADVOCATE_MODE in parallel
         segments_by_id = {str(s.id): s for s in segments}
-        options_by_letter = {opt["label"]: opt.get("description", "") for opt in options}
+        options_by_letter: dict[str, str] = {str(opt["label"]): str(opt.get("description", "")) for opt in options}
         da_outputs = await run_all_devil_advocates(
             reaction_outputs=reaction_outputs,
             segments_by_id=segments_by_id,
@@ -264,8 +267,8 @@ async def _orchestrated_pipeline(simulation_id: str, db: object, settings: objec
         ))
 
         # 5. Persist cells + orchestrator memo
-        option_type_by_letter = {
-            opt["label"]: opt.get("option_type", "feature") for opt in options
+        option_type_by_letter: dict[str, str] = {
+            str(opt["label"]): str(opt.get("option_type", "feature")) for opt in options
         }
         await _persist_v2_results(
             db=db,
@@ -275,25 +278,25 @@ async def _orchestrated_pipeline(simulation_id: str, db: object, settings: objec
             da_outputs=da_outputs,
             orch_result=orch_out.result,
             option_type_by_letter=option_type_by_letter,
-            min_sources=settings.min_sources_for_high_confidence,  # type: ignore[union-attr]
+            min_sources=settings.min_sources_for_high_confidence,
         )
 
     except Exception:
-        sim2 = await db.get(Simulation, uuid.UUID(simulation_id))  # type: ignore[union-attr]
+        sim2 = await db.get(Simulation, uuid.UUID(simulation_id))
         if sim2 is not None:
             sim2.status = "failed"
-            await db.commit()  # type: ignore[union-attr]
+            await db.commit()
         raise
 
 
 async def _persist_v2_results(
-    db: object,
-    simulation: object,
-    segments: list,
-    reaction_outputs: list,
-    da_outputs: list,
-    orch_result: object,
-    option_type_by_letter: dict,
+    db: AsyncSession,
+    simulation: Simulation,
+    segments: list[Any],
+    reaction_outputs: list[Any],
+    da_outputs: list[Any],
+    orch_result: Any,
+    option_type_by_letter: dict[str, str],
     min_sources: int,
 ) -> None:
     from app.core.confidence import (
@@ -308,7 +311,7 @@ async def _persist_v2_results(
     seg_by_id = {s.id: s for s in segments}
 
     # Pre-compute embeddings list per segment for stability calculation
-    all_embeddings: dict = {}
+    all_embeddings: dict[Any, list[float]] = {}
     for s in segments:
         emb = s.embedding
         if emb is None:
@@ -374,25 +377,25 @@ async def _persist_v2_results(
         ))
 
     await persist_cells(
-        simulation_id=simulation.id,  # type: ignore[union-attr]
+        simulation_id=simulation.id,
         cell_results=cell_results,
-        db=db,  # type: ignore[arg-type]
+        db=db,
     )
 
     if orch_result is not None:
-        orchestrator_memo = {
-            "recommendation": orch_result.recommendation,  # type: ignore[union-attr]
-            "confidence_rationale": orch_result.confidence_rationale,  # type: ignore[union-attr]
-            "strongest_counter_case": orch_result.strongest_counter_case,  # type: ignore[union-attr]
-            "conflict_resolution": orch_result.conflict_resolution,  # type: ignore[union-attr]
-            "rubric_failures_count": orch_result.rubric_failures_count,  # type: ignore[union-attr]
-            "stale_calibration_types": orch_result.stale_calibration_types,  # type: ignore[union-attr]
+        orchestrator_memo: dict[str, Any] = {
+            "recommendation": orch_result.recommendation,
+            "confidence_rationale": orch_result.confidence_rationale,
+            "strongest_counter_case": orch_result.strongest_counter_case,
+            "conflict_resolution": orch_result.conflict_resolution,
+            "rubric_failures_count": orch_result.rubric_failures_count,
+            "stale_calibration_types": orch_result.stale_calibration_types,
         }
         if hasattr(simulation, "orchestrator_memo"):
-            simulation.orchestrator_memo = orchestrator_memo  # type: ignore[union-attr]
-            await db.commit()  # type: ignore[union-attr]
+            simulation.orchestrator_memo = orchestrator_memo
+            await db.commit()
         else:
             log.warning(
                 "orchestrator_memo not persisted: Simulation model has no "
-                "orchestrator_memo field. Add it in Sub-prompt 5."
+                "orchestrator_memo field. Add migration 0004."
             )

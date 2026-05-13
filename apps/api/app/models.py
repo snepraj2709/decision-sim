@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pgvector.sqlalchemy import Vector  # type: ignore[import-untyped]
 from sqlalchemy import (
@@ -212,6 +212,8 @@ class Simulation(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    orchestrator_memo: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     cells: Mapped[list[SimulationCell]] = relationship(
         back_populates="simulation", cascade="all, delete-orphan"

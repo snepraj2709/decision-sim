@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from typing import Any
 
 import dspy
 
@@ -123,7 +124,7 @@ class DevilsAdvocateAgent(Agent[DAInput, DAOutput]):
 
 
 async def run_all_devil_advocates(
-    reaction_outputs: list[AgentOutput[object]],
+    reaction_outputs: list[AgentOutput[Any]],
     segments_by_id: dict[str, Segment],
     options_by_letter: dict[str, str],
 ) -> list[AgentOutput[DAOutput]]:
