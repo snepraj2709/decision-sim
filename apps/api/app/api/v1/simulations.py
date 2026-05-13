@@ -28,7 +28,8 @@ from app.schemas import (
     SimulationJobStatus,
     SimulationRead,
 )
-from app.workers.tasks import task_run_simulation
+from app.agents.config import is_agent_mode_v2
+from app.workers.tasks import task_run_simulation, task_run_simulation_v2
 
 router = APIRouter()
 settings = get_settings()
@@ -150,8 +151,9 @@ async def create_simulation(
     await db.commit()
 
     queue = _get_queue()
+    task_fn = task_run_simulation_v2 if is_agent_mode_v2() else task_run_simulation
     job = queue.enqueue(
-        task_run_simulation,
+        task_fn,
         str(simulation_id),
         job_timeout="10m",
     )
