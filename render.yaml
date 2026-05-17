@@ -1,0 +1,67 @@
+services:
+  - type: web
+    name: decision-sim-api
+    runtime: docker
+    plan: free
+    repo: https://github.com/snepraj2709/decision-sim
+    branch: main
+    dockerContext: .
+    dockerfilePath: ./apps/api/Dockerfile
+    healthCheckPath: /api/v1/health
+    preDeployCommand: bash scripts/render-migrate.sh
+    autoDeployTrigger: commit
+    envVars:
+      - key: DATABASE_CONNECTION_STRING
+        fromDatabase:
+          name: decision-sim-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: decision-sim-redis
+          property: connectionString
+      - key: ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: REQUIRE_EVIDENCE_ANCHORS
+        value: "true"
+      - key: MIN_SOURCES_FOR_HIGH_CONFIDENCE
+        value: "3"
+      - key: DEMO_CACHE_ENABLED
+        value: "true"
+      - key: DEVIL_ADVOCATE_MODE
+        value: selective
+      - key: AGENT_MODE
+        value: v1
+      - key: WEB_BASE_URL
+        sync: false
+      - key: API_BASE_URL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: EXA_API_KEY
+        sync: false
+      - key: SONNET_MODEL
+        sync: false
+      - key: HAIKU_MODEL
+        sync: false
+
+  - type: keyvalue
+    name: decision-sim-redis
+    plan: free
+    ipAllowList: []
+    maxmemoryPolicy: allkeys-lru
+
+databases:
+  - name: decision-sim-db
+    plan: free
+    databaseName: dsim
+    user: dsim
+    postgresMajorVersion: "16"
