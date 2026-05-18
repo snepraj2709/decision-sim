@@ -56,3 +56,5 @@ coverage/
 .local/
 tmp/
 .gitnexus/
+.vercel
+.env*.local
