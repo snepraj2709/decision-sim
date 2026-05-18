@@ -3,6 +3,8 @@ set -euo pipefail
 
 source scripts/render-env.sh
 
+uv run alembic upgrade head
+
 uv run rq worker --url "$REDIS_URL" &
 worker_pid=$!
 

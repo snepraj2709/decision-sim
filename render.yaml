@@ -8,7 +8,6 @@ services:
     dockerContext: .
     dockerfilePath: ./apps/api/Dockerfile
     healthCheckPath: /api/v1/health
-    preDeployCommand: bash scripts/render-migrate.sh
     autoDeployTrigger: commit
     envVars:
       - key: DATABASE_CONNECTION_STRING
