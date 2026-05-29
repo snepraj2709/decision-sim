@@ -297,7 +297,7 @@ function SnapshotFieldRow({
   if (!field) return null;
   return (
     <div
-      className="py-3 flex items-start gap-4"
+      className="px-4 sm:px-6 py-3 flex items-start gap-4"
       style={{ borderBottom: "1px solid var(--line)" }}
     >
       <div
